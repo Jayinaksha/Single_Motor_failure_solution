@@ -98,7 +98,7 @@ constexpr float D = 0.1f;
 /////////////////////////////************************************************************//////////////////////////////////////////// */
 //main control parameters for geometric control
 const double mass = 0.61;      // Mass of the drone (kg)
-const double k_p = 35*mass;    // Proportional gain for position
+const double k_p = 50*mass;    // Proportional gain for position
 const double k_v = 0*mass;    // Proportional gain for velocity
 const double k_R = 0;    // Proportional gain for attitude
 const double k_Omega = 0; // Proportional gain for angular velocity
