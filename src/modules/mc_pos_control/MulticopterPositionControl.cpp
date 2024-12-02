@@ -633,15 +633,15 @@ trajectory_setpoint_s MulticopterPositionControl::generateFailsafeSetpoint(const
 			PX4_WARN("Failsafe: stop and wait");
 		}
 
-	} else {
-		// descend with land speed since we can't stop
-		failsafe_setpoint.acceleration[0] = failsafe_setpoint.acceleration[1] = 0.f;
-		failsafe_setpoint.velocity[2] = _param_mpc_land_speed.get();
+	} //else {
+	// 	// descend with land speed since we can't stop
+	// 	failsafe_setpoint.acceleration[0] = failsafe_setpoint.acceleration[1] = 0.f;
+	// 	failsafe_setpoint.velocity[2] = _param_mpc_land_speed.get();
 
-		if (warn) {
-			PX4_WARN("Failsafe: blind land");
-		}
-	}
+	// 	if (warn) {
+	// 		PX4_WARN("Failsafe: blind land");
+	// 	}
+	// }
 
 	if (PX4_ISFINITE(states.velocity(2))) {
 		// don't move along z if we can stop in all dimensions
@@ -649,15 +649,15 @@ trajectory_setpoint_s MulticopterPositionControl::generateFailsafeSetpoint(const
 			failsafe_setpoint.velocity[2] = 0.f;
 		}
 
-	} else {
-		// emergency descend with a bit below hover thrust
-		failsafe_setpoint.velocity[2] = NAN;
-		failsafe_setpoint.acceleration[2] = .3f;
+	} //else {
+	// 	// emergency descend with a bit below hover thrust
+	// 	failsafe_setpoint.velocity[2] = NAN;
+	// 	failsafe_setpoint.acceleration[2] = .3f;
 
-		if (warn) {
-			PX4_WARN("Failsafe: blind descent");
-		}
-	}
+	// 	if (warn) {
+	// 		PX4_WARN("Failsafe: blind descent");
+	// 	}
+	//}
 
 	return failsafe_setpoint;
 }

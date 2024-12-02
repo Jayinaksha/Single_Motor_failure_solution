@@ -37,9 +37,11 @@
  * Main state machine / business logic
  *
  */
-
+#include <px4_platform_common/log.h>
+#include <lib/mathlib/mathlib.h>
 #include "Commander.hpp"
-
+#include <uORB/topics/vehicle_attitude.h>
+#include <mathlib/mathlib.h>  // For quaternion functions
 /* commander module headers */
 #include "Arming/ArmAuthorization/ArmAuthorization.h"
 #include "commander_helper.h"
@@ -73,6 +75,185 @@
 
 #include <uORB/topics/mavlink_log.h>
 #include <uORB/topics/tune_control.h>
+
+#include <uORB/Subscription.hpp>
+#include <uORB/topics/actuator_controls_status.h>
+#include <matrix/math.hpp>
+#include <vector>
+#include <cmath>
+
+#include <uORB/topics/failure_flag.h> //declared the custom uORB failure_flag
+
+
+using namespace std;
+
+
+//logic for triggering falisafe
+// Declare the publisher in your class
+uORB::Publication<failure_flag_s> _failure_flag_pub{ORB_ID(failure_flag)};
+
+
+/*const matrix::Matrix3f INERTIA_MATRIX = {
+    {0.029125f, 0.0f, 0.0f},
+    {0.0f, 0.029125f, 0.0f},
+    {0.0f, 0.0f, 0.055225f}
+};*/
+
+
+//matrix::Vector3f torque = INERTIA_MATRIX * angular_acceleration;
+vector<double> cross_product(const vector<double> &a, const vector<double> &b) {
+    return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+}
+
+vector<double> mat_vec_mult(const vector<vector<double>> &mat, const vector<double> &vec) {
+    vector<double> result(3, 0);
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            result[i] += mat[i][j] * vec[j];
+        }
+    }
+    return result;
+}
+
+vector<double> scalar_vec_mult(double scalar, const vector<double> &vec) {
+    return {scalar * vec[0], scalar * vec[1], scalar * vec[2]};
+}
+
+vector<double> vec_sub(const vector<double> &a, const vector<double> &b) {
+    return {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+}
+
+vector<double> vec_add(const vector<double> &a, const vector<double> &b) {
+    return {a[0] + b[0], a[1] + b[1], a[2] + b[2]};
+}
+
+vector<vector<double>> diag_mat_inv(const vector<vector<double>> &mat) {
+    vector<vector<double>> inv(3, vector<double>(3, 0));
+    for (int i = 0; i < 3; ++i) {
+        inv[i][i] = 1.0 / mat[i][i];
+    }
+    return inv;
+}
+
+vector<double> predictive_state(const vector<double> &w1, const vector<vector<double>> &I, const vector<double> &tao, double t) {
+    vector<vector<double>> I_inv = diag_mat_inv(I);
+    vector<double> cross_product_res = cross_product(w1, mat_vec_mult(I, w1));
+    vector<double> difference = vec_sub(tao, cross_product_res);
+    vector<double> scaled_result = scalar_vec_mult(t, mat_vec_mult(I_inv, difference));
+    return vec_add(w1, scaled_result);
+}
+
+pair<vector<double>, int> compare(vector<double> &w0, const vector<double> &w1, const vector<vector<double>> &I, const vector<double> &tao, const vector<double> &thresh_error, double t) {
+    vector<double> estimated_err = vec_sub(w0, w1);
+    vector<double> w1p = predictive_state(w1, I, tao, t);
+    w0 = w1p;
+    int flag = 0;
+    for (int i = 0; i < 3; ++i) {
+        if (abs(estimated_err[i]) > thresh_error[i]) {
+            flag = 1;
+            break;
+        }
+    }
+    return make_pair(estimated_err, flag);
+}
+
+vector<double> get_real_time_torques() {
+    uORB::SubscriptionData<actuator_controls_status_s> actuator_controls_status_sub{ORB_ID(actuator_controls_status_0)};
+    actuator_controls_status_s actuator_controls_status;
+
+    // Check for updates
+    if (actuator_controls_status_sub.update()) {
+        actuator_controls_status_sub.copy(&actuator_controls_status);
+
+        // Get control power values
+        double roll_power = actuator_controls_status.control_power[0];
+        double pitch_power = actuator_controls_status.control_power[1];
+        double yaw_power = actuator_controls_status.control_power[2];
+
+        // Map to real torques (adjust based on your drone's parameters)
+        double roll_torque = roll_power * 1.816;  // Replace 1.0 with max roll torque
+        double pitch_torque = pitch_power * 1.816; // Replace 1.0 with max pitch torque
+        double yaw_torque = yaw_power * 72.6;   // Replace 1.0 with max yaw torque
+
+        return {roll_torque, pitch_torque, yaw_torque};
+    }
+
+    // If no update, return zeros
+    return {0.0, 0.0, 0.0};
+}
+/*************************************************************************************************** */
+
+void faulty_motor(const vector<double> &arr) {
+	failure_flag_s failure_msg; //an instance for failsafe_flag
+
+	// Initialize the failsafe message with default values
+    failure_msg.timestamp = hrt_absolute_time();  // Current time in microseconds
+    failure_msg.failure_detected = false;          // Initially assume no failure
+    failure_msg.failed_motor_index = -1;           // No failure
+    failure_msg.failure_type = 0;                   // Default: no failure
+
+    if (arr[0] > 0 && arr[1] > 0 && arr[2] < 0) {
+        PX4_WARN("Fault in 3rd motor");
+		failure_msg.failure_detected = true;
+        failure_msg.failed_motor_index = 2;  // 3rd motor failed
+        failure_msg.failure_type = 1;
+    } else if (arr[0] < 0 && arr[1] > 0 && arr[2] > 0) {
+        PX4_WARN("Fault in 4th motor");
+		failure_msg.failure_detected = true;
+        failure_msg.failed_motor_index = 3;  // 1st motor failed
+        failure_msg.failure_type = 1;   
+    } else if (arr[0] < 0 && arr[1] < 0 && arr[2] < 0) {
+        PX4_WARN("Fault in 1st motor");
+		failure_msg.failure_detected = true;
+        failure_msg.failed_motor_index = 0;  // 4th motor failed
+        failure_msg.failure_type = 1;
+    } else if (arr[0] > 0 && arr[1] < 0 && arr[2] > 0) {
+        PX4_WARN("Fault in 2nd motor");
+		failure_msg.failure_detected = true;
+        failure_msg.failed_motor_index = 1;  // 2nd motor failed
+        failure_msg.failure_type = 1;
+    }
+	// if fault detected publish message
+	if (failure_msg.failure_detected) {
+        _failure_flag_pub.publish(failure_msg);
+        PX4_INFO("Motor failure detected! Published failsafe flag with timestamp: %lu", failure_msg.timestamp);
+    }
+/************************************************************************************************************************************ */
+}
+/*void faulty_motor(const vector<double> &arr) {
+    if (arr[0] > 0 && arr[1] > 0) {
+        PX4_WARN("Fault in 3rd motor");
+    } else if (arr[0] < 0 && arr[1] > 0) {
+        PX4_WARN("Fault in 1st motor");
+    } else if (arr[0] < 0 && arr[1] < 0) {
+        PX4_WARN("Fault in 4th motor");
+    } else if (arr[0] > 0 && arr[1] < 0) {
+        PX4_WARN("Fault in 2nd motor");
+    }
+}
+*/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 typedef enum VEHICLE_MODE_FLAG {
 	VEHICLE_MODE_FLAG_CUSTOM_MODE_ENABLED  = 1,   /* 0b00000001 Reserved for future use. | */
@@ -230,12 +411,78 @@ static bool broadcast_vehicle_command(const uint32_t cmd, const float param1 = N
 }
 #endif
 
+
 int Commander::custom_command(int argc, char *argv[])
 {
 	if (!is_running()) {
 		print_usage("not running");
 		return 1;
 	}
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	/*uORB::SubscriptionData<vehicle_attitude_s> vehicle_attitude_sub{ORB_ID(vehicle_attitude)};
+        vehicle_attitude_s vehicle_attitude;
+    
+        if (vehicle_attitude_sub.update()) {
+            vehicle_attitude_sub.copy(&vehicle_attitude);
+            PX4_INFO("sdfgfwqerggt");
+            // Convert quaternion to Euler angles (yaw, pitch, roll)
+            float q[4] = {vehicle_attitude.q[0], vehicle_attitude.q[1], vehicle_attitude.q[2], vehicle_attitude.q[3]};
+            float yaw = atan2(2.0f * (q[0] * q[1] + q[2] * q[3]), 1.0f - 2.0f * (q[1] * q[1] + q[2] * q[2]));
+            float pitch = asin(2.0f * (q[0] * q[2] - q[3] * q[1]));
+            float roll = atan2(2.0f * (q[0] * q[3] + q[1] * q[2]), 1.0f - 2.0f * (q[2] * q[2] + q[3] * q[3]));
+
+            // Convert radians to degrees
+            yaw = math::degrees(yaw);
+            pitch = math::degrees(pitch);
+            roll = math::degrees(roll);
+
+            // Define thresholds
+            const float YAW_THRESHOLD = 45.0f;   // example threshold in degrees
+            const float PITCH_THRESHOLD = 30.0f; // example threshold in degrees
+            const float ROLL_THRESHOLD = 30.0f;  // example threshold in degrees
+
+        
+            if (fabs(yaw) > YAW_THRESHOLD) {
+                PX4_WARN("Yaw angle exceeded threshold: %.2f degrees", static_cast<double>(yaw));
+            }
+        
+            if (fabs(pitch) > PITCH_THRESHOLD) {
+                PX4_WARN("Pitch angle exceeded threshold: %.2f degrees", static_cast<double>(pitch));
+            }
+        
+            if (fabs(roll) > ROLL_THRESHOLD) {
+                PX4_WARN("Roll angle exceeded threshold: %.2f degrees", static_cast<double>(roll));
+            }
+        }*/	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
 
 #ifndef CONSTRAINED_FLASH
 
@@ -332,7 +579,145 @@ int Commander::custom_command(int argc, char *argv[])
 		return 0;
 	}
 
+
+
+
+
+
+
+
+
+
+
+
+
+
 	if (!strcmp(argv[0], "takeoff")) {
+    // Switch to takeoff mode and arm
+    	    uORB::SubscriptionData<vehicle_command_ack_s> vehicle_command_ack_sub{ORB_ID(vehicle_command_ack)};
+    	    send_vehicle_command(vehicle_command_s::VEHICLE_CMD_NAV_TAKEOFF);
+
+    	    if (wait_for_vehicle_command_reply(vehicle_command_s::VEHICLE_CMD_NAV_TAKEOFF, vehicle_command_ack_sub)) {
+        	    send_vehicle_command(vehicle_command_s::VEHICLE_CMD_COMPONENT_ARM_DISARM,
+                             	    static_cast<float>(vehicle_command_s::ARMING_ACTION_ARM),
+                             	    0.f);
+    	    }
+
+    	    uORB::SubscriptionData<vehicle_attitude_s> vehicle_attitude_sub{ORB_ID(vehicle_attitude)};
+    	    uORB::SubscriptionData<vehicle_angular_velocity_s> vehicle_angular_velocity_sub{ORB_ID(vehicle_angular_velocity)};
+
+
+    	    /*const float PITCH_THRESHOLD = 30.0f;
+    	    const float ROLL_THRESHOLD = 145.0f;*/
+
+	    vector<double> w0 = {0, 0, 0}; // Initialize predictive state
+            vector<vector<double>> I = {
+    		{0.029125, 0, 0}, {0, 0.029125, 0}, {0, 0, 0.055225}
+	    };
+	    vector<double> thresh_error = {0.5, 0.5, 1}; // Threshold errors
+
+	    double t = 0.005;
+
+    	    while (true) {
+        	if (vehicle_attitude_sub.update() && vehicle_angular_velocity_sub.update()) {
+            	    vehicle_attitude_s vehicle_attitude;
+            	    vehicle_angular_velocity_s vehicle_angular_velocity;
+
+            	    vehicle_attitude_sub.copy(&vehicle_attitude);
+            	    vehicle_angular_velocity_sub.copy(&vehicle_angular_velocity);
+                    vector<double> tao = get_real_time_torques();
+
+		    vector<double> w1 = {
+                    	vehicle_angular_velocity.xyz[0],
+                    	vehicle_angular_velocity.xyz[1],
+                    	vehicle_angular_velocity.xyz[2]
+                    };
+                    
+                    pair<vector<double>, int> result = compare(w0, w1, I, tao, thresh_error, t);
+            	    vector<double> estimated_err = result.first;
+            	    int flag = result.second;
+            	    
+            	    if (flag == 1) {
+                	faulty_motor(estimated_err);
+                	break;
+            	    }
+
+            	 
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+             /*       
+            // Convert quaternion to Euler angles
+            	        float q[4] = {vehicle_attitude.q[0], vehicle_attitude.q[1], vehicle_attitude.q[2], vehicle_attitude.q[3]};
+            	        float yaw = atan2(2.0f * (q[0] * q[1] + q[2] * q[3]), 1.0f - 2.0f * (q[1] * q[1] + q[2] * q[2]));
+            	        float pitch = asin(2.0f * (q[0] * q[2] - q[3] * q[1]));
+            	        float roll = atan2(2.0f * (q[0] * q[3] + q[1] * q[2]), 1.0f - 2.0f * (q[2] * q[2] + q[3] * q[3]));
+
+            // Convert to degrees
+            	        yaw = math::degrees(yaw);
+            	        pitch = math::degrees(pitch);
+            	        roll = math::degrees(roll);
+
+            // Check thresholds
+
+
+            	        if (fabs(yaw) > YAW_THRESHOLD) {
+            	            PX4_WARN("Yaw exceeded threshold: %.2f degrees", static_cast<double>(yaw));
+            	            break;
+            	        }
+            	        //yes = false;
+           	        if (fabs(pitch) > PITCH_THRESHOLD) {
+                	    PX4_WARN("Pitch exceeded threshold: %.2f degrees", static_cast<double>(pitch));
+            	        }
+            	        if (fabs(roll) > ROLL_THRESHOLD) {
+                	    PX4_WARN("Roll exceeded threshold: %.2f degrees", static_cast<double>(roll));
+            	        }
+            	        if (threshold_exceeded) {
+            		    PX4_WARN("Threshold exceeded, breaking loop");
+            		    break; // Exit the loop
+        		}*/
+        	   }
+        	   
+        	   usleep(100000); // 100 ms delay
+        	   
+    	     }
+    	     
+
+
+    	      return 0;
+        }
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	/*if (!strcmp(argv[0], "takeoff")) {
 		// switch to takeoff mode and arm
 		uORB::SubscriptionData<vehicle_command_ack_s> vehicle_command_ack_sub{ORB_ID(vehicle_command_ack)};
 		send_vehicle_command(vehicle_command_s::VEHICLE_CMD_NAV_TAKEOFF);
@@ -342,9 +727,79 @@ int Commander::custom_command(int argc, char *argv[])
 					     static_cast<float>(vehicle_command_s::ARMING_ACTION_ARM),
 					     0.f);
 		}
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		uORB::SubscriptionData<vehicle_attitude_s> vehicle_attitude_sub{ORB_ID(vehicle_attitude)};
+        vehicle_attitude_s vehicle_attitude;
+    
+        	if (vehicle_attitude_sub.update()) {
+           	    vehicle_attitude_sub.copy(&vehicle_attitude);
+            	    PX4_INFO("sdfgfwqerggt");
+            	// Convert quaternion to Euler angles (yaw, pitch, roll)
+           	     float q[4] = {vehicle_attitude.q[0], vehicle_attitude.q[1], vehicle_attitude.q[2], vehicle_attitude.q[3]};
+            	    float yaw = atan2(2.0f * (q[0] * q[1] + q[2] * q[3]), 1.0f - 2.0f * (q[1] * q[1] + q[2] * q[2]));
+            	    float pitch = asin(2.0f * (q[0] * q[2] - q[3] * q[1]));
+            	    float roll = atan2(2.0f * (q[0] * q[3] + q[1] * q[2]), 1.0f - 2.0f * (q[2] * q[2] + q[3] * q[3]));
 
+            	// Convert radians to degrees
+            	    yaw = math::degrees(yaw);
+            	    pitch = math::degrees(pitch);
+            	    roll = math::degrees(roll);
+
+            // Define thresholds
+                    const float YAW_THRESHOLD = 45.0f;   // example threshold in degrees
+            	    const float PITCH_THRESHOLD = 30.0f; // example threshold in degrees
+            	    const float ROLL_THRESHOLD = 30.0f;  // example threshold in degrees
+
+        
+            	    if (fabs(yaw) > YAW_THRESHOLD) {
+            	        PX4_WARN("Yaw angle exceeded threshold: %.2f degrees", static_cast<double>(yaw));
+           	     }
+        
+           	     if (fabs(pitch) > PITCH_THRESHOLD) {
+            	        PX4_WARN("Pitch angle exceeded threshold: %.2f degrees", static_cast<double>(pitch));
+           	     }
+        
+           	     if (fabs(roll) > ROLL_THRESHOLD) {
+                    PX4_WARN("Roll angle exceeded threshold: %.2f degrees", static_cast<double>(roll));
+          	      }
+      	      }
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
 		return 0;
-	}
+	}*/
 
 	if (!strcmp(argv[0], "land")) {
 		send_vehicle_command(vehicle_command_s::VEHICLE_CMD_NAV_LAND);
@@ -596,13 +1051,7 @@ transition_result_t Commander::arm(arm_disarm_reason_t calling_reason, bool run_
 
 		_health_and_arming_checks.update(false, true);
 
-		if (!_health_and_arming_checks.canArm(_vehicle_status.nav_state)) {
-			tune_negative(true);
-			mavlink_log_critical(&_mavlink_log_pub, "Arming denied: Resolve system health failures first\t");
-			events::send(events::ID("commander_arm_denied_resolve_failures"), {events::Log::Critical, events::LogInternal::Info},
-				     "Arming denied: Resolve system health failures first");
-			return TRANSITION_DENIED;
-		}
+		
 	}
 
 	_vehicle_status.armed_time = hrt_absolute_time();
@@ -1970,7 +2419,7 @@ void Commander::checkForMissionUpdate()
 	if (_mission_result_sub.updated()) {
 		const mission_result_s &mission_result = _mission_result_sub.get();
 
-		const uint32_t prev_mission_mission_id = mission_result.mission_id;
+		const auto prev_mission_mission_id = mission_result.mission_id;
 		_mission_result_sub.update();
 
 		// if mission_result is valid for the current mission
@@ -2155,10 +2604,9 @@ void Commander::vtolStatusUpdate()
 	if (_vtol_vehicle_status_sub.update(&_vtol_vehicle_status) && is_vtol(_vehicle_status)) {
 
 		// Check if there has been any change while updating the flags (transition = rotary wing status)
-		const uint8_t new_vehicle_type =
-			_vtol_vehicle_status.vehicle_vtol_state == vtol_vehicle_status_s::VEHICLE_VTOL_STATE_FW ?
-			vehicle_status_s::VEHICLE_TYPE_FIXED_WING :
-			vehicle_status_s::VEHICLE_TYPE_ROTARY_WING;
+		const auto new_vehicle_type = _vtol_vehicle_status.vehicle_vtol_state == vtol_vehicle_status_s::VEHICLE_VTOL_STATE_FW ?
+					      vehicle_status_s::VEHICLE_TYPE_FIXED_WING :
+					      vehicle_status_s::VEHICLE_TYPE_ROTARY_WING;
 
 		if (new_vehicle_type != _vehicle_status.vehicle_type) {
 			_vehicle_status.vehicle_type = new_vehicle_type;

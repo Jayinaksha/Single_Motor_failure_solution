@@ -40,7 +40,9 @@
  */
 
 #pragma once
-
+/***********************************************************/	
+#include <uORB/topics/vehicle_local_position.h>
+/***********************************************************/	
 #include <ActuatorEffectiveness.hpp>
 #include <ActuatorEffectivenessMultirotor.hpp>
 #include <ActuatorEffectivenessStandardVTOL.hpp>
@@ -109,7 +111,7 @@ public:
 	void Run() override;
 
 	bool init();
-
+	void updateFailureStatus();
 private:
 
 	struct ParamHandles {
@@ -177,6 +179,13 @@ private:
 
 	uORB::Subscription _vehicle_torque_setpoint1_sub{ORB_ID(vehicle_torque_setpoint), 1};  /**< vehicle torque setpoint subscription (2. instance) */
 	uORB::Subscription _vehicle_thrust_setpoint1_sub{ORB_ID(vehicle_thrust_setpoint), 1};	 /**< vehicle thrust setpoint subscription (2. instance) */
+	
+	
+/***********************************************************/	
+	
+	uORB::Subscription _vehicle_local_position_sub{ORB_ID(vehicle_local_position)};
+
+/***********************************************************/	
 
 	// Outputs
 	uORB::PublicationMulti<control_allocator_status_s> _control_allocator_status_pub[2] {ORB_ID(control_allocator_status), ORB_ID(control_allocator_status)};
@@ -218,3 +227,4 @@ private:
 	)
 
 };
+

@@ -444,181 +444,181 @@ FailsafeBase::ActionOptions Failsafe::fromRemainingFlightTimeLowActParam(int par
 void Failsafe::checkStateAndMode(const hrt_abstime &time_us, const State &state,
 				 const failsafe_flags_s &status_flags)
 {
-	updateArmingState(time_us, state.armed, status_flags);
+// 	updateArmingState(time_us, state.armed, status_flags);
 
-	const bool in_forward_flight = state.vehicle_type == vehicle_status_s::VEHICLE_TYPE_FIXED_WING
-				       || state.vtol_in_transition_mode;
+// 	const bool in_forward_flight = state.vehicle_type == vehicle_status_s::VEHICLE_TYPE_FIXED_WING
+// 				       || state.vtol_in_transition_mode;
 
-	// Do not enter failsafe while doing a vtol takeoff after the vehicle has started a transition and before it reaches the loiter
-	// altitude. The vtol takeoff navigaton mode will set mission_finished to true as soon as the loiter is established
-	const bool ignore_link_failsafe = state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_VTOL_TAKEOFF
-					  && in_forward_flight && !state.mission_finished;
+// 	// Do not enter failsafe while doing a vtol takeoff after the vehicle has started a transition and before it reaches the loiter
+// 	// altitude. The vtol takeoff navigaton mode will set mission_finished to true as soon as the loiter is established
+// 	const bool ignore_link_failsafe = state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_VTOL_TAKEOFF
+// 					  && in_forward_flight && !state.mission_finished;
 
-	// Manual control (RC) loss
-	if (!status_flags.manual_control_signal_lost) {
-		// If manual control was lost and arming was allowed, consider it optional until we regain manual control
-		_manual_control_lost_at_arming = false;
-	}
+// 	// Manual control (RC) loss
+// 	if (!status_flags.manual_control_signal_lost) {
+// 		// If manual control was lost and arming was allowed, consider it optional until we regain manual control
+// 		_manual_control_lost_at_arming = false;
+// 	}
 
-	const bool rc_loss_ignored_mission = state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION
-					     && (_param_com_rcl_except.get() & (int)ManualControlLossExceptionBits::Mission);
-	const bool rc_loss_ignored_loiter = state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER
-					    && (_param_com_rcl_except.get() & (int)ManualControlLossExceptionBits::Hold);
-	const bool rc_loss_ignored_offboard = state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_OFFBOARD
-					      && (_param_com_rcl_except.get() & (int)ManualControlLossExceptionBits::Offboard);
-	const bool rc_loss_ignored_takeoff = (state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_TAKEOFF ||
-					      state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_VTOL_TAKEOFF)
-					     && (_param_com_rcl_except.get() & (int)ManualControlLossExceptionBits::Hold);
-	const bool rc_loss_ignored = rc_loss_ignored_mission || rc_loss_ignored_loiter || rc_loss_ignored_offboard ||
-				     rc_loss_ignored_takeoff || ignore_link_failsafe || _manual_control_lost_at_arming;
+// 	const bool rc_loss_ignored_mission = state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION
+// 					     && (_param_com_rcl_except.get() & (int)ManualControlLossExceptionBits::Mission);
+// 	const bool rc_loss_ignored_loiter = state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER
+// 					    && (_param_com_rcl_except.get() & (int)ManualControlLossExceptionBits::Hold);
+// 	const bool rc_loss_ignored_offboard = state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_OFFBOARD
+// 					      && (_param_com_rcl_except.get() & (int)ManualControlLossExceptionBits::Offboard);
+// 	const bool rc_loss_ignored_takeoff = (state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_TAKEOFF ||
+// 					      state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_VTOL_TAKEOFF)
+// 					     && (_param_com_rcl_except.get() & (int)ManualControlLossExceptionBits::Hold);
+// 	const bool rc_loss_ignored = rc_loss_ignored_mission || rc_loss_ignored_loiter || rc_loss_ignored_offboard ||
+// 				     rc_loss_ignored_takeoff || ignore_link_failsafe || _manual_control_lost_at_arming;
 
-	if (_param_com_rc_in_mode.get() != int32_t(RcInMode::StickInputDisabled) && !rc_loss_ignored) {
-		CHECK_FAILSAFE(status_flags, manual_control_signal_lost,
-			       fromNavDllOrRclActParam(_param_nav_rcl_act.get()).causedBy(Cause::ManualControlLoss));
-	}
+// 	if (_param_com_rc_in_mode.get() != int32_t(RcInMode::StickInputDisabled) && !rc_loss_ignored) {
+// 		CHECK_FAILSAFE(status_flags, manual_control_signal_lost,
+// 			       fromNavDllOrRclActParam(_param_nav_rcl_act.get()).causedBy(Cause::ManualControlLoss));
+// 	}
 
-	// GCS connection loss
-	const bool gcs_connection_loss_ignored = state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_LAND ||
-			state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_PRECLAND || ignore_link_failsafe;
+// 	// GCS connection loss
+// 	const bool gcs_connection_loss_ignored = state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_LAND ||
+// 			state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_PRECLAND || ignore_link_failsafe;
 
-	if (_param_nav_dll_act.get() != int32_t(gcs_connection_loss_failsafe_mode::Disabled) && !gcs_connection_loss_ignored) {
-		CHECK_FAILSAFE(status_flags, gcs_connection_lost,
-			       fromNavDllOrRclActParam(_param_nav_dll_act.get()).causedBy(Cause::GCSConnectionLoss));
-	}
+// 	if (_param_nav_dll_act.get() != int32_t(gcs_connection_loss_failsafe_mode::Disabled) && !gcs_connection_loss_ignored) {
+// 		CHECK_FAILSAFE(status_flags, gcs_connection_lost,
+// 			       fromNavDllOrRclActParam(_param_nav_dll_act.get()).causedBy(Cause::GCSConnectionLoss));
+// 	}
 
-	// VTOL transition failure (quadchute)
-	if (state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION ||
-	    state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER ||
-	    state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_TAKEOFF ||
-	    state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_VTOL_TAKEOFF) {
-		CHECK_FAILSAFE(status_flags, vtol_fixed_wing_system_failure, fromQuadchuteActParam(_param_com_qc_act.get()));
-	}
+// 	// VTOL transition failure (quadchute)
+// 	if (state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION ||
+// 	    state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER ||
+// 	    state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_TAKEOFF ||
+// 	    state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_VTOL_TAKEOFF) {
+// 		CHECK_FAILSAFE(status_flags, vtol_fixed_wing_system_failure, fromQuadchuteActParam(_param_com_qc_act.get()));
+// 	}
 
-	// Mission
-	if (state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION) {
-		CHECK_FAILSAFE(status_flags, mission_failure, Action::RTL);
+// 	// Mission
+// 	if (state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION) {
+// 		CHECK_FAILSAFE(status_flags, mission_failure, Action::RTL);
 
-		// If manual control loss and GCS connection loss are disabled and we lose both command links and the mission finished,
-		// trigger RTL to avoid losing the vehicle
-		if ((_param_com_rc_in_mode.get() == int32_t(RcInMode::StickInputDisabled) || rc_loss_ignored_mission)
-		    && _param_nav_dll_act.get() == int32_t(gcs_connection_loss_failsafe_mode::Disabled)
-		    && state.mission_finished) {
-			_last_state_mission_control_lost = checkFailsafe(_caller_id_mission_control_lost, _last_state_mission_control_lost,
-							   status_flags.gcs_connection_lost, Action::RTL);
-		}
-	}
+// 		// If manual control loss and GCS connection loss are disabled and we lose both command links and the mission finished,
+// 		// trigger RTL to avoid losing the vehicle
+// 		if ((_param_com_rc_in_mode.get() == int32_t(RcInMode::StickInputDisabled) || rc_loss_ignored_mission)
+// 		    && _param_nav_dll_act.get() == int32_t(gcs_connection_loss_failsafe_mode::Disabled)
+// 		    && state.mission_finished) {
+// 			_last_state_mission_control_lost = checkFailsafe(_caller_id_mission_control_lost, _last_state_mission_control_lost,
+// 							   status_flags.gcs_connection_lost, Action::RTL);
+// 		}
+// 	}
 
-	CHECK_FAILSAFE(status_flags, wind_limit_exceeded,
-		       ActionOptions(fromHighWindLimitActParam(_param_com_wind_max_act.get()).cannotBeDeferred()));
-	CHECK_FAILSAFE(status_flags, flight_time_limit_exceeded, ActionOptions(Action::RTL).cannotBeDeferred());
+// 	CHECK_FAILSAFE(status_flags, wind_limit_exceeded,
+// 		       ActionOptions(fromHighWindLimitActParam(_param_com_wind_max_act.get()).cannotBeDeferred()));
+// 	CHECK_FAILSAFE(status_flags, flight_time_limit_exceeded, ActionOptions(Action::RTL).cannotBeDeferred());
 
-	// trigger Low Position Accuracy Failsafe (only in auto mission and auto loiter)
-	if (state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION ||
-	    state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER) {
-		CHECK_FAILSAFE(status_flags, local_position_accuracy_low, fromPosLowActParam(_param_com_pos_low_act.get()));
-	}
+// 	// trigger Low Position Accuracy Failsafe (only in auto mission and auto loiter)
+// 	if (state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION ||
+// 	    state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER) {
+// 		CHECK_FAILSAFE(status_flags, local_position_accuracy_low, fromPosLowActParam(_param_com_pos_low_act.get()));
+// 	}
 
-	if (state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_TAKEOFF ||
-	    state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_RTL) {
-		CHECK_FAILSAFE(status_flags, navigator_failure,
-			       ActionOptions(Action::Land).clearOn(ClearCondition::OnModeChangeOrDisarm));
+// 	if (state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_TAKEOFF ||
+// 	    state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_RTL) {
+// 		CHECK_FAILSAFE(status_flags, navigator_failure,
+// 			       ActionOptions(Action::Land).clearOn(ClearCondition::OnModeChangeOrDisarm));
 
-	} else {
-		CHECK_FAILSAFE(status_flags, navigator_failure,
-			       ActionOptions(Action::Hold).clearOn(ClearCondition::OnModeChangeOrDisarm));
-	}
+// 	} else {
+// 		CHECK_FAILSAFE(status_flags, navigator_failure,
+// 			       ActionOptions(Action::Hold).clearOn(ClearCondition::OnModeChangeOrDisarm));
+// 	}
 
-	CHECK_FAILSAFE(status_flags, geofence_breached, fromGfActParam(_param_gf_action.get()).cannotBeDeferred());
+// 	CHECK_FAILSAFE(status_flags, geofence_breached, fromGfActParam(_param_gf_action.get()).cannotBeDeferred());
 
-	// Battery flight time remaining failsafe
-	CHECK_FAILSAFE(status_flags, battery_low_remaining_time,
-		       ActionOptions(fromRemainingFlightTimeLowActParam(_param_com_fltt_low_act.get())));
+// 	// Battery flight time remaining failsafe
+// 	CHECK_FAILSAFE(status_flags, battery_low_remaining_time,
+// 		       ActionOptions(fromRemainingFlightTimeLowActParam(_param_com_fltt_low_act.get())));
 
-	if ((_armed_time != 0)
-	    && (time_us < _armed_time + static_cast<hrt_abstime>(_param_com_spoolup_time.get() * 1_s))
-	   ) {
-		CHECK_FAILSAFE(status_flags, battery_unhealthy, ActionOptions(Action::Disarm).cannotBeDeferred());
+// 	if ((_armed_time != 0)
+// 	    && (time_us < _armed_time + static_cast<hrt_abstime>(_param_com_spoolup_time.get() * 1_s))
+// 	   ) {
+// 		CHECK_FAILSAFE(status_flags, battery_unhealthy, ActionOptions(Action::Disarm).cannotBeDeferred());
 
-	} else {
-		CHECK_FAILSAFE(status_flags, battery_unhealthy, Action::Warn);
-	}
+// 	} else {
+// 		CHECK_FAILSAFE(status_flags, battery_unhealthy, Action::Warn);
+// 	}
 
-	// Battery low failsafe
-	// If battery was low and arming was allowed through COM_ARM_BAT_MIN, don't failsafe immediately for the current low battery warning state
-	const bool warning_worse_than_at_arming = (status_flags.battery_warning > _battery_warning_at_arming);
-	const int32_t low_battery_action = warning_worse_than_at_arming ?
-					   _param_com_low_bat_act.get() : (int32_t)LowBatteryAction::Warning;
+// 	// Battery low failsafe
+// 	// If battery was low and arming was allowed through COM_ARM_BAT_MIN, don't failsafe immediately for the current low battery warning state
+// 	const bool warning_worse_than_at_arming = (status_flags.battery_warning > _battery_warning_at_arming);
+// 	const int32_t low_battery_action = warning_worse_than_at_arming ?
+// 					   _param_com_low_bat_act.get() : (int32_t)LowBatteryAction::Warning;
 
-	switch (status_flags.battery_warning) {
-	case battery_status_s::BATTERY_WARNING_LOW:
-		_last_state_battery_warning_low = checkFailsafe(_caller_id_battery_warning_low, _last_state_battery_warning_low,
-						  true, fromBatteryWarningActParam(low_battery_action, battery_status_s::BATTERY_WARNING_LOW));
-		break;
+// 	switch (status_flags.battery_warning) {
+// 	case battery_status_s::BATTERY_WARNING_LOW:
+// 		_last_state_battery_warning_low = checkFailsafe(_caller_id_battery_warning_low, _last_state_battery_warning_low,
+// 						  true, fromBatteryWarningActParam(low_battery_action, battery_status_s::BATTERY_WARNING_LOW));
+// 		break;
 
-	case battery_status_s::BATTERY_WARNING_CRITICAL:
-		_last_state_battery_warning_critical = checkFailsafe(_caller_id_battery_warning_critical,
-						       _last_state_battery_warning_critical,
-						       true, fromBatteryWarningActParam(low_battery_action, battery_status_s::BATTERY_WARNING_CRITICAL));
-		break;
+// 	case battery_status_s::BATTERY_WARNING_CRITICAL:
+// 		_last_state_battery_warning_critical = checkFailsafe(_caller_id_battery_warning_critical,
+// 						       _last_state_battery_warning_critical,
+// 						       true, fromBatteryWarningActParam(low_battery_action, battery_status_s::BATTERY_WARNING_CRITICAL));
+// 		break;
 
-	case battery_status_s::BATTERY_WARNING_EMERGENCY:
-		_last_state_battery_warning_emergency = checkFailsafe(_caller_id_battery_warning_emergency,
-							_last_state_battery_warning_emergency,
-							true, fromBatteryWarningActParam(low_battery_action, battery_status_s::BATTERY_WARNING_EMERGENCY));
-		break;
+// 	case battery_status_s::BATTERY_WARNING_EMERGENCY:
+// 		_last_state_battery_warning_emergency = checkFailsafe(_caller_id_battery_warning_emergency,
+// 							_last_state_battery_warning_emergency,
+// 							true, fromBatteryWarningActParam(low_battery_action, battery_status_s::BATTERY_WARNING_EMERGENCY));
+// 		break;
 
-	default:
-		break;
-	}
-
-
-	// Handle fails during spoolup just after arming
-	if ((_armed_time != 0)
-	    && (time_us < _armed_time + static_cast<hrt_abstime>(_param_com_spoolup_time.get() * 1_s))
-	   ) {
-		CHECK_FAILSAFE(status_flags, fd_esc_arming_failure, ActionOptions(Action::Disarm).cannotBeDeferred());
-		CHECK_FAILSAFE(status_flags, battery_unhealthy, ActionOptions(Action::Disarm).cannotBeDeferred());
-	}
-
-	// Handle fails during the early takeoff phase
-	if ((_armed_time != 0)
-	    && (time_us < _armed_time
-		+ static_cast<hrt_abstime>((_param_com_lkdown_tko.get() + _param_com_spoolup_time.get()) * 1_s))
-	   ) {
-		CHECK_FAILSAFE(status_flags, fd_critical_failure, ActionOptions(Action::Disarm).cannotBeDeferred());
-
-	} else if (!circuit_breaker_enabled_by_val(_param_cbrk_flightterm.get(), CBRK_FLIGHTTERM_KEY)) {
-		CHECK_FAILSAFE(status_flags, fd_critical_failure, ActionOptions(Action::Terminate).cannotBeDeferred());
-
-	} else {
-		CHECK_FAILSAFE(status_flags, fd_critical_failure, Action::Warn);
-	}
-
-	CHECK_FAILSAFE(status_flags, fd_imbalanced_prop, fromImbalancedPropActParam(_param_com_imb_prop_act.get()));
-	CHECK_FAILSAFE(status_flags, fd_motor_failure, fromActuatorFailureActParam(_param_com_actuator_failure_act.get()));
+// 	default:
+// 		break;
+// 	}
 
 
+// 	// Handle fails during spoolup just after arming
+// 	if ((_armed_time != 0)
+// 	    && (time_us < _armed_time + static_cast<hrt_abstime>(_param_com_spoolup_time.get() * 1_s))
+// 	   ) {
+// 		CHECK_FAILSAFE(status_flags, fd_esc_arming_failure, ActionOptions(Action::Disarm).cannotBeDeferred());
+// 		CHECK_FAILSAFE(status_flags, battery_unhealthy, ActionOptions(Action::Disarm).cannotBeDeferred());
+// 	}
 
-	// Mode fallback (last)
-	Action mode_fallback_action = checkModeFallback(status_flags, state.user_intended_mode);
-	_last_state_mode_fallback = checkFailsafe(_caller_id_mode_fallback, _last_state_mode_fallback,
-				    mode_fallback_action != Action::None,
-				    ActionOptions(mode_fallback_action).allowUserTakeover(UserTakeoverAllowed::Always).cannotBeDeferred());
+// 	// Handle fails during the early takeoff phase
+// 	if ((_armed_time != 0)
+// 	    && (time_us < _armed_time
+// 		+ static_cast<hrt_abstime>((_param_com_lkdown_tko.get() + _param_com_spoolup_time.get()) * 1_s))
+// 	   ) {
+// 		CHECK_FAILSAFE(status_flags, fd_critical_failure, ActionOptions(Action::Disarm).cannotBeDeferred());
+
+// 	} else if (!circuit_breaker_enabled_by_val(_param_cbrk_flightterm.get(), CBRK_FLIGHTTERM_KEY)) {
+// 		CHECK_FAILSAFE(status_flags, fd_critical_failure, ActionOptions(Action::Terminate).cannotBeDeferred());
+
+// 	} else {
+// 		CHECK_FAILSAFE(status_flags, fd_critical_failure, Action::Warn);
+// 	}
+
+// 	CHECK_FAILSAFE(status_flags, fd_imbalanced_prop, fromImbalancedPropActParam(_param_com_imb_prop_act.get()));
+// 	CHECK_FAILSAFE(status_flags, fd_motor_failure, fromActuatorFailureActParam(_param_com_actuator_failure_act.get()));
+
+
+
+// 	// Mode fallback (last)
+// 	Action mode_fallback_action = checkModeFallback(status_flags, state.user_intended_mode);
+// 	_last_state_mode_fallback = checkFailsafe(_caller_id_mode_fallback, _last_state_mode_fallback,
+// 				    mode_fallback_action != Action::None,
+// 				    ActionOptions(mode_fallback_action).allowUserTakeover(UserTakeoverAllowed::Always).cannotBeDeferred());
 }
 
 void Failsafe::updateArmingState(const hrt_abstime &time_us, bool armed, const failsafe_flags_s &status_flags)
 {
-	if (!_was_armed && armed) {
-		_armed_time = time_us;
-		_manual_control_lost_at_arming = status_flags.manual_control_signal_lost;
-		_battery_warning_at_arming = status_flags.battery_warning;
+	// if (!_was_armed && armed) {
+	// 	_armed_time = time_us;
+	// 	_manual_control_lost_at_arming = status_flags.manual_control_signal_lost;
+	// 	_battery_warning_at_arming = status_flags.battery_warning;
 
-	} else if (!armed) {
-		_manual_control_lost_at_arming = status_flags.manual_control_signal_lost; // ensure action isn't added while disarmed
-		_armed_time = 0;
-	}
+	// } else if (!armed) {
+	// 	_manual_control_lost_at_arming = status_flags.manual_control_signal_lost; // ensure action isn't added while disarmed
+	// 	_armed_time = 0;
+	// }
 
-	_was_armed = armed;
+	// _was_armed = armed;
 }
 
 FailsafeBase::Action Failsafe::checkModeFallback(const failsafe_flags_s &status_flags,

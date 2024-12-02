@@ -427,7 +427,7 @@ bool MixingOutput::update()
 
 	if (_has_backup_schedule) {
 		_interface.ScheduleDelayed(50_ms);
-	}
+}
 
 	// check for actuator test
 	_actuator_test.update(_max_num_outputs, _param_thr_mdl_fac.get());
@@ -665,8 +665,7 @@ MixingOutput::actualFailsafeValue(int index) const
 		}
 
 		value = output_limit_calc_single(index, default_failsafe);
-
-	} else {
+	}else {
 		value = _failsafe_value[index];
 	}
 
