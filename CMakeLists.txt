@@ -143,6 +143,8 @@ list(GET PX4_VERSION_PATCH 0 PX4_VERSION_PATCH)
 # # Capture only the hash part after 'g'
 string(REGEX MATCH "g([a-f0-9]+)$" GIT_HASH "${PX4_GIT_TAG}")
 set(PX4_GIT_HASH ${CMAKE_MATCH_1})
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 define_property(GLOBAL PROPERTY PX4_MODULE_LIBRARIES
                  BRIEF_DOCS "PX4 module libs"
@@ -405,6 +407,7 @@ set(TESTFILTER "" CACHE STRING "Filter string for ctest to selectively only run 
 # if testing is enabled download and configure gtest
 list(APPEND CMAKE_MODULE_PATH ${PX4_SOURCE_DIR}/cmake/gtest/)
 include(px4_add_gtest)
+
 if(BUILD_TESTING)
 	include(gtest)
 

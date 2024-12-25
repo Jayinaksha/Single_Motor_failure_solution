@@ -38,8 +38,8 @@
  *
  * @author Julien Lecoeur <julien.lecoeur@gmail.com>
  */
-#include <iostream>
-#include <eigen3/Eigen/Dense>
+//#include <iostream>
+//#include <eigen3/Eigen/Dense>
 #include <cmath>
 #include "ControlAllocator.hpp"
 
@@ -49,7 +49,6 @@
 #include <mathlib/math/Functions.hpp>
 
 
-//ideaforge_team86
 //declaring things failure_flag.h in the code
 #include <uORB/topics/failure_flag.h> 
 //control_allocator // printing
@@ -68,20 +67,21 @@
 using namespace matrix;
 using namespace time_literals;
 //declaration of variables
-
+extern "C" __EXPORT int log_data_main(int argc, char *argv[]);
 //for failure detection
 bool fail_change;
-int faillM_indx=3;
+int failM_index=3;
 bool check=false;
 bool geo;
-
+float dt =0;
 //for control algo
 float roll, pitch, yaw;
 float roll_rate, pitch_rate, yaw_rate;
 float altitude,position_x,position_y;
 float velocity_x,velocity_y,velocity_z;
+float velocity_x_previous, velocity_y_previous, velocity_z_previous;
 float desired_roll, desired_pitch, desired_yaw, thrust_setpoint;
-double latitude, longitude;
+float latitude, longitude;
 Vector3f torque_output;
 float thrust_output;
 Vector4f motor_outputs;
@@ -95,105 +95,304 @@ constexpr float MAX_THRUST = 1.0f;     // Max thrust for each motor
 constexpr float MIN_THRUST = 0.0f; 
 constexpr float L = 0.2f;              // Lever arm length (meters)
 constexpr float D = 0.1f; 
+/********************************************************************************************** */
+/*The below code is defined for geometric controller along with the MRAC(model response adaptive control)
+this code takes the input after detection of failsafe from the failure_flag.msg after suscribing to it.
+The code takes input as roll_rate,pitch_rate and yaw_rate from the vehical angular velocity .
+local position such as altitude from vehicle_local_position uORB topics 
+then it performs calculation according to the mentioned control equations in the outer , inner and allocation loops and then publishes motor rpm values after normalisation to the actuator_optputs topics*/ 
+/********************************************************************************************** */
 /////////////////////////////************************************************************//////////////////////////////////////////// */
 //main control parameters for geometric control
-const double mass = 0.61;      // Mass of the drone (kg)
-const double k_p = 50*mass;    // Proportional gain for position
-const double k_v = 0*mass;    // Proportional gain for velocity
-const double k_R = 0;    // Proportional gain for attitude
-const double k_Omega = 0; // Proportional gain for angular velocity
-const double gravity = 9.81;     // Gravity (m/s^2)
-const Eigen::Matrix3d J = (Eigen::Matrix3d() << 0.082, 0.0, 0.0,
-                                                0.0, 0.0845, 0.0,
-                                                0.0, 0.0, 0.1377).finished(); // Inertia matrix
+static float staticlat=latitude,staticlong=longitude;
+#include <px4_platform_common/px4_config.h>
+#include <px4_platform_common/log.h>
+#include <matrix/matrix/math.hpp>
+#include <uORB/uORB.h>
+#include <uORB/topics/vehicle_local_position.h>
+#include <uORB/topics/vehicle_attitude.h>
+#include <uORB/topics/vehicle_angular_velocity.h>
+#include <uORB/topics/actuator_outputs.h>
+#include <drivers/drv_hrt.h>
+//#include <xlsxwriter.h>
+using namespace matrix;
+
+// Drone parameters
+const double mass = 2.0;
+double k_p = 5 * mass;
+double k_v = 5 * mass;
+double k_R = 6.3;
+double k_Omega = 0.55;
+const float gravity = 9.81;
+
+Matrix3f J; // Global declaration
+//inertia matrix
+void initializeMatrixJ() {
+    J(0, 0) = 0.0024657f; J(0, 1) = 0.0f;   J(0, 2) = 0.0f;
+    J(1, 0) = 0.0f;   J(1, 1) = 0.0027657f; J(1, 2) = 0.0f;
+    J(2, 0) = 0.0f;   J(2, 1) = 0.0f;   J(2, 2) = 0.0042354f;
+}
+
+
 // Rotor constants
-const double thrust_coeff =8/3 ;    // Thrust coefficient-k_f
-const double distance = 0.25;  // distance_of arm from com 
+const double thrust_coeff = 1024.0*2;
+const double distance = 0.1125;
+
+// Adaptive MRAC rates
+double alpha_p = 0.00000001;
+double alpha_v = 0.0000001;
+double alpha_R = 0.0000001;
+double alpha_Omega = 0.0000001;
+
 // Desired states
-Eigen::Vector3d position_desired(1.0, 1.0, -9.0);  // Desired position-p_d
-Eigen::Vector3d velocity_desired(0.0, 0.0, 0.0);  // Desired velocity-v_d
-Eigen::Matrix3d Rotational_matrix_desired = Eigen::Matrix3d::Identity();  // Desired rotation matrix
-Eigen::Vector3d Omega_desired(0.0, 0.0, 0.0);  // Desired angular velocity
-Eigen::Vector3d thrust;
-Eigen::Vector3d torque; 
-Eigen::Vector3d force_total;
+Vector3f position_desired{1.0f, 1.0f, -5.0f};
+Vector3f velocity_desired{0.0f, 0.0f, 0.0f};
+Vector3f Omega_desired{0.0f, 0.0f, 0.0f};
 
+Matrix3f Rotational_matrix_desired;
+void initialize_rot_matrix(){
+	Rotational_matrix_desired(0,0) =1.0f; Rotational_matrix_desired(0,1) =0.0f; Rotational_matrix_desired(0,2) =0.0f;
+	Rotational_matrix_desired(1,0) =0.0f; Rotational_matrix_desired(1,1) =1.0f; Rotational_matrix_desired(1,2) =0.0f;
+	Rotational_matrix_desired(2,0) =0.0f; Rotational_matrix_desired(2,1) =0.0f; Rotational_matrix_desired(2,2) =1.0f;
+} 
 
-// Fault-Tolerant Control (FTC) logic
-Eigen::Vector4d calculateRotorSpeeds(double failed_rotor_index) {
-    // Conversion matrix for rotor speeds
-    Eigen::Matrix<double, 3, 4> B;
-    B << thrust_coeff,  thrust_coeff,  thrust_coeff,  thrust_coeff,
-         0.0, 0.0, distance*thrust_coeff, -distance*thrust_coeff,
-         -distance*thrust_coeff,distance*thrust_coeff, 0.0, 0.0;
+// Clamp function
+double clamp(double value, double min_val, double max_val) {
+    return fmax(min_val, fmin(value, max_val));
+}
 
-    // Remove the failed rotor's contribution
+// Function to adaptively tune controller gains using MRAC
+void adaptGains(const Vector3f &error_position, const Vector3f &error_velocity, 
+                const Vector3f &error_Rotational_matrix, const Vector3f &error_Omega) {
+    k_p += mass * alpha_p * (double)error_position.dot(error_position);
+    k_v += mass * alpha_v * (double)error_velocity.dot(error_velocity);
+    k_R += alpha_R * (double)error_Rotational_matrix.dot(error_Rotational_matrix);
+    k_Omega += alpha_Omega * (double)error_Omega.dot(error_Omega);
+
+    k_p = clamp(k_p, 0.1, 500.0);
+    k_v = clamp(k_v, 0.1, 500.0);
+    k_R = clamp(k_R, 0.1, 500.0);
+    k_Omega = clamp(k_Omega, 0.1, 500.0);
+}
+
+// Global matrix B for thrust coefficients and force distribution
+matrix::Matrix<float, 3, 4> B;
+void initialiseB() {
+    B(0, 0) = thrust_coeff; B(0, 1) = thrust_coeff; B(0, 2) = thrust_coeff; B(0, 3) = thrust_coeff;
+    B(1, 0) = -distance * thrust_coeff; B(1, 1) =  distance * thrust_coeff; B(1, 2) =  distance * thrust_coeff; B(1, 3) = -distance * thrust_coeff;
+    B(2, 0) = -distance * thrust_coeff; B(2, 1) =  distance * thrust_coeff; B(2, 2) =  distance * thrust_coeff; B(2, 3) = -distance * thrust_coeff;
+}
+
+// Function to calculate rotor speeds for fault-tolerant control
+matrix::Vector<float, 4> calculateRotorSpeeds(int failed_rotor_index, const matrix::Vector<float, 3> &force_total) {
+    initialiseB();  // Initialize matrix B
+
+    // Check for a valid rotor index and set the corresponding column to zero
     if (failed_rotor_index >= 0 && failed_rotor_index < 4) {
-        B.col(failed_rotor_index).setZero();
+       // Set the entire column to zero
+		for (int i = 0; i < 3; ++i) {
+    		B(i, failed_rotor_index) = 0.0f;
+		}
+
+    }
+//orthogonal matri decomposition
+    // Step 1: Gram-Schmidt orthogonalization
+    matrix::Matrix<float, 3, 4> Q;  // Orthogonal matrix
+    matrix::Matrix<float, 4, 4> R;  // Upper triangular matrix
+
+    // Gram-Schmidt Process
+    for (int j = 0; j < 4; ++j) {
+        // Step 1: Start by assigning the j-th column of B to the j-th column of Q
+        Q(0, j) = B(0, j);
+        Q(1, j) = B(1, j);
+        Q(2, j) = B(2, j);
+
+        // Step 2: Orthogonalize the j-th column against all previous columns in Q
+        for (int i = 0; i < j; ++i) {
+            float dot_product = Q(0, i) * Q(0, j) + Q(1, i) * Q(1, j) + Q(2, i) * Q(2, j);
+            for (int k = 0; k < 3; ++k) {
+                Q(k, j) -= dot_product * Q(k, i);
+            }
+        }
+
+        // Step 3: Normalize the j-th column of Q
+        float norm = std::sqrt(Q(0, j) * Q(0, j) + Q(1, j) * Q(1, j) + Q(2, j) * Q(2, j));
+        for (int k = 0; k < 3; ++k) {
+            Q(k, j) /= norm;
+        }
     }
 
-    // Solve for squared rotor speeds
-    Eigen::Vector4d omega_squared = B.completeOrthogonalDecomposition().solve(force_total);
-    for (int i = 0; i < omega_squared.size(); ++i) {
-        omega_squared[i] = std::max(0.0, omega_squared[i]); // Ensure non-negative speeds
+    // Step 2: Calculate the upper triangular matrix R (since Q is orthogonal, B = Q * R)
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j <= i; ++j) {
+            R(i, j) = Q(0, i) * B(0, j) + Q(1, i) * B(1, j) + Q(2, i) * B(2, j);
+        }
     }
+
+    // Step 3: Solve for omega_squared (since B = Q * R, omega_squared = R^(-1) * Q^T * total_force)
+    matrix::Vector<float, 4> temp = Q.transpose() * force_total;
+	matrix::Vector<float, 4> omega_squared;
+    // Solve R * omega_squared = temp (since R is upper triangular, we can solve it using backward substitution)
+    omega_squared(3) = temp(3) / R(3, 3);
+    omega_squared(2) = (temp(2) - R(2, 3) * omega_squared(3)) / R(2, 2);
+    omega_squared(1) = (temp(1) - R(1, 2) * omega_squared(2) - R(1, 3) * omega_squared(3)) / R(1, 1);
+    omega_squared(0) = (temp(0) - R(0, 1) * omega_squared(1) - R(0, 2) * omega_squared(2) - R(0, 3) * omega_squared(3)) / R(0, 0);
+
+    // Output the result
+    // Ensure that omega_squared values are non-negative
+    for (int i = 0; i < 4; ++i) {  // Since omega_squared has 4 elements
+    omega_squared(i) = fmax(0.0f, omega_squared(i));
+	}
+
     return omega_squared;
 }
-void geometric_controller_main_logic(){
-	// Current states (to be fetched from PX4 or simulation)
-    Eigen::Vector3d position(position_x, position_y, altitude);  // Current position
-    Eigen::Vector3d velocity(velocity_x, velocity_y, velocity_z);  // Current velocity
-    Eigen::Matrix3d Rotational_matrix_current = Eigen::Matrix3d::Identity();  // Current rotation matrix
-    Eigen::Vector3d Omega(roll_rate, pitch_rate, yaw_rate);  // Current angular velocity
 
-    // Compute position and velocity errors
-    Eigen::Vector3d error_position = position - position_desired;
-    Eigen::Vector3d error_velocity = velocity - velocity_desired;
+ void write_excel() {
+//     lxw_workbook  *workbook  = workbook_new("log.xlsx");
+//     lxw_worksheet *worksheet = workbook_add_worksheet(workbook, NULL);
 
-    // Compute attitude and angular velocity errors
-    Eigen::Matrix3d e_R_mat = 0.5 * (Rotational_matrix_desired.transpose() * Rotational_matrix_current - Rotational_matrix_current.transpose() * Rotational_matrix_desired);
-    Eigen::Vector3d error_Rotational_matrix(e_R_mat(2, 1), e_R_mat(0, 2), e_R_mat(1, 0));  // Skew-symmetric to vector
-    Eigen::Vector3d error_Omega = Omega - Rotational_matrix_current.transpose() * Rotational_matrix_desired * Omega_desired;
+//     worksheet_write_string(worksheet, 0, 0, "roll", roll);
+//     worksheet_write_string(worksheet, 0, 1, "pitch", pitch);
+//     worksheet_write_string(worksheet, 0, 2, "yaw", yaw);
+// 	worksheet_write_string(worksheet, 0, 3, "roll_rate", roll_rate);
+// 	worksheet_write_string(worksheet, 0, 4, "pitch_rate", pitch_rate);
+// 	worksheet_write_string(worksheet, 0, 5, "yaw_rate", yaw_rate);
+
+
+//     for (int i = 1; i <= 10; ++i) {
+//         worksheet_write_number(worksheet, i, 0, roll, NULL);
+//         worksheet_write_number(worksheet, i, 1, pitch, NULL);
+//         worksheet_write_number(worksheet, i, 2, yaw, NULL);
+// 		worksheet_write_number(worksheet, i, 3, roll_rate, NULL);
+//         worksheet_write_number(worksheet, i, 4, pitch_rate, NULL);
+//         worksheet_write_number(worksheet, i, 5, yaw_rate, NULL);
+//     }
+
+//     workbook_close(workbook);
+}
+
+
+
+// Main controller logic
+void geometric_controller_main_logic() {
+	initializeMatrixJ();
+	initialize_rot_matrix();
+    static int local_pos_sub = orb_subscribe(ORB_ID(vehicle_local_position));
+    static int attitude_sub = orb_subscribe(ORB_ID(vehicle_attitude));
+    static int angular_velocity_sub = orb_subscribe(ORB_ID(vehicle_angular_velocity));
+    static orb_advert_t actuator_outputs_pub = nullptr;
+
+    struct vehicle_local_position_s local_pos;
+    struct vehicle_attitude_s attitude;
+    struct vehicle_angular_velocity_s angular_velocity;
+
+    if (orb_copy(ORB_ID(vehicle_local_position), local_pos_sub, &local_pos) != PX4_OK ||
+        orb_copy(ORB_ID(vehicle_attitude), attitude_sub, &attitude) != PX4_OK ||
+        orb_copy(ORB_ID(vehicle_angular_velocity), angular_velocity_sub, &angular_velocity) != PX4_OK) {
+        PX4_ERR("Failed to copy vehicle state topics.");
+        return;
+    }
+
+    // Current states
+	Vector3f velocity_pr;
+    Vector3f position(local_pos.x, local_pos.y, local_pos.z);
+    Vector3f velocity(local_pos.vx, local_pos.vy, local_pos.vz);
+    Quatf q(attitude.q[0], attitude.q[1], attitude.q[2], attitude.q[3]);
+    Vector3f Omega(angular_velocity.xyz[0], angular_velocity.xyz[1]*0, angular_velocity.xyz[2]);
+	matrix::Matrix3f Rotational_matrix_current;
+
+	// Extract the components of the quaternion
+	float w = q(0);
+	float x = q(1);
+	float y = q(2);
+	float z = q(3);
+
+	// Manually calculate the DCM (rotation matrix) from the quaternion
+	Rotational_matrix_current(0, 0) = 1 - 2 * (y * y + z * z);
+	Rotational_matrix_current(0, 1) = 2 * (x * y - z * w);
+	Rotational_matrix_current(0, 2) = 2 * (x * z + y * w);
+
+	Rotational_matrix_current(1, 0) = 2 * (x * y + z * w);
+	Rotational_matrix_current(1, 1) = 1 - 2 * (x * x + z * z);
+	Rotational_matrix_current(1, 2) = 2 * (y * z - x * w);
+
+	Rotational_matrix_current(2, 0) = 2 * (x * z - y * w);
+	Rotational_matrix_current(2, 1) = 2 * (y * z + x * w);
+	Rotational_matrix_current(2, 2) = 1 - 2 * (x * x + y * y);
+	
+    // Compute errors
+    Vector3f error_position = position - position_desired;
+    Vector3f error_velocity = velocity - velocity_desired;
+    Matrix3f e_R_mat =  (Rotational_matrix_desired.transpose() * Rotational_matrix_current /*-
+                              Rotational_matrix_current.transpose() * Rotational_matrix_desired*/);
+    Matrix3f error_matrix= 0.5f*(e_R_mat-e_R_mat.transpose());
+	Vector3f error_Rotational_matrix(error_matrix(0, 0), error_matrix(1, 1), error_matrix(2, 2));
+    Vector3f error_Omega = Omega - Rotational_matrix_current.transpose() * Rotational_matrix_desired * Omega_desired;
+	Vector3f acc = velocity-velocity_pr/dt;
+    // Adapt gains
+    adaptGains(error_position, error_velocity, error_Rotational_matrix, error_Omega);
 
     // Compute thrust and torque commands
-	thrust = mass * (gravity * Eigen::Vector3d(0, 0, 1) - k_p * error_position - k_v * error_velocity);
-    torque = -k_R * error_Rotational_matrix - k_Omega * error_Omega + Omega.cross(J * Omega);
+    Vector3f thrust = (float)mass * (gravity * Vector3f(0, 0, 1) + (float)k_p * error_position + (float)k_v * error_velocity + acc);
+    Vector3f torque = (float)-k_R * error_Rotational_matrix - (float)k_Omega * error_Omega;
 
-    // Combine thrust and torque into a force-torque vector
-    force_total << thrust.norm(), torque(0), torque(1);
+    Vector3f force_total(thrust.norm(), torque(0), torque(1));
 
-    // Fault-tolerant control for rotor failure (e.g., rotor 2 fails)
-    int failed_rotor_index = faillM_indx;  // Set -1 if no failure
-    Eigen::Vector4d rotor_speeds = calculateRotorSpeeds(failed_rotor_index);
+    // Fault-tolerant control for rotor failure (e.g., rotor 3 fails)
+    Vector4f rotor_speeds = calculateRotorSpeeds(failM_index, force_total);
 
-	//output 
-	motor_outputs(0) = static_cast<float>(rotor_speeds(0));
-	motor_outputs(1) = static_cast<float>(rotor_speeds(1));
-	motor_outputs(2) = static_cast<float>(rotor_speeds(2));
-	motor_outputs(3) = static_cast<float>(rotor_speeds(3));
-    // Output results
-    // std::cout << "Thrust: " << thrust.transpose() << std::endl;
-    // std::cout << "Torque: " << torque.transpose() << std::endl;
-    // std::cout << "Rotor Speeds (squared): " << rotor_speeds.transpose() << std::endl;
+    // Publish actuator outputs
+    struct actuator_outputs_s actuator_outputs = {};
+	// if(geo){
+	// 	PX4_INFO("rotor1:%f,rotor2:%f,rotor3:%f,rotor4:%f",(double)rotor_speeds(0),(double)rotor_speeds(1),(double)rotor_speeds(2),(double)rotor_speeds(3));
+	// }
+	motor_outputs(0)= rotor_speeds(0);
+	motor_outputs(1)= rotor_speeds(1);
+	motor_outputs(2)= rotor_speeds(2);
+	motor_outputs(3)= rotor_speeds(3);
+    // actuator_outputs.output[0] = rotor_speeds(0);
+    // actuator_outputs.output[1] = rotor_speeds(1);
+    // actuator_outputs.output[2] = rotor_speeds(2);
+    // actuator_outputs.output[3] = rotor_speeds(3);
+    actuator_outputs.timestamp = hrt_absolute_time();
 
+    if (actuator_outputs_pub == nullptr) {
+        actuator_outputs_pub = orb_advertise(ORB_ID(actuator_outputs), &actuator_outputs);
+    } else {
+        orb_publish(ORB_ID(actuator_outputs), actuator_outputs_pub, &actuator_outputs);
+    }
+	write_excel();
+	velocity_pr=velocity;
 }
+/******************************************************************************************************************************************************* */
+// //pid implementation
+// float kp_position,kd_position,ki_position;
+// float kp_velocity,kd_velocity,ki_velocity;
+// float kp_roll,kd_roll,ki_roll;
+// float kp_pitch,kd_pitch,ki_pitch;
+// float kp_yaw,kd_yaw,ki_yaw;
+// float altitude_prev;
+// float position_integral_z_prev;
+// float position_error_z_prev;
+// float compute_error(float current, float desired){
+// 	int error = current-desired;
+// 	return error;
+// }
+// float compute_integral(float current, float previous){
+// 	integral = position_integral_z_prev+ (current-previous)/dt;
+// }
+// void pid_main_logic(){
+// 	//position error
+// 	float position_error_z = compute_error(altitude,altitude_prev);
+// 	float integral_z = compute_integral(position_error_z,position_error_z_prev);
+// 	float pid_position =kp_position*position_error_z+ki_position*integral_z+kd_position*derivative_z;
+
+// }
+/******************************************************************************************************************************************************* */
 /****************///////////////////////////////////////////////////////////*************************************/////////////////////////////////////// */ */
 // Add a member variable for the subscription
-uORB::Subscription _failure_flag_sub{ORB_ID(failure_flag)};
+uORB::Subscription _failure_flag_sub{ORB_ID(failure_flag)}; //suscription to custom made failure_flag.
 /**********************************///////////////////////////////*************** */ */
-struct PIDDef{
-	float* error;
-	float* kpid_roll;
-	float* kpid_pitch;
-	// float* KP_ATTITUDE = 5.0f;
-	// float* KD_ATTITUDE = 0.5f;
-	// float* MAX_THRUST = 1.0f;
-	// float* MIN_THRUST = 0.0f; 
-	//int* kpid_yaw;
-};
-struct motorDef{
-	float* pwm;
-};
 void fetchFlightData() {
     // Subscriptions
     static uORB::Subscription vehicle_attitude_sub{ORB_ID(vehicle_attitude)};
@@ -223,6 +422,9 @@ void fetchFlightData() {
         pitch_rate = angular_velocity.xyz[1]*180 / pi; // Pitch rate in rad/s
         yaw_rate = angular_velocity.xyz[2]*180 / pi;   // Yaw rate in rad/s
     }
+	roll_rate/=2;
+	roll_rate+=0.6f;
+	//pitch_rate*=1.5f;
 
     // Altitude (from vehicle_local_position)
     if (vehicle_local_position_sub.update(&local_position)) {
@@ -270,100 +472,6 @@ void update_attitude_setpoint() {
     }
 }
 
-// Template function to create an identity matrix
-// template <size_t N>
-// matrix::Matrix<float, N, N> identityMatrix() {
-//     matrix::Matrix<float, N, N> identity; // Create an N x N matrix
-
-//     // Set diagonal elements to 1 and others to 0
-//     for (size_t i = 0; i < N; i++) {
-//         for (size_t j = 0; j < N; j++) {
-//             identity(i, j) = (i == j) ? 1.0f : 0.0f; // Diagonal = 1, Off-diagonal = 0
-//         }
-//     }
-
-//     return identity; // Return the identity matrix
-// }
-
-// bool invertMatrix(const matrix::Matrix<float, 3, 3> &input, matrix::Matrix<float, 3, 3> &inverse) {
-//     // Create an identity matrix using the template function
-//     inverse = identityMatrix<3>();
-
-//     // Make a copy of the input matrix
-//     matrix::Matrix<float, 3, 3> A = input;
-
-//     // Perform Gaussian elimination
-//     for (size_t i = 0; i < 3; i++) {
-//         // Find the pivot element
-//         float pivot = A(i, i);
-//         if (fabsf(pivot) < 1e-6f) {
-//             PX4_ERR("Matrix is singular and cannot be inverted.");
-//             return false; // Singular matrix
-//         }
-
-//         // Scale the row to make the pivot element 1
-//         for (size_t j = 0; j < 3; j++) {
-//             A(i, j) /= pivot;
-//             inverse(i, j) /= pivot;
-//         }
-
-//         // Eliminate other elements in the column
-//         for (size_t k = 0; k < 3; k++) {
-//             if (k != i) {
-//                 float factor = A(k, i);
-//                 for (size_t j = 0; j < 3; j++) {
-//                     A(k, j) -= factor * A(i, j);
-//                     inverse(k, j) -= factor * inverse(i, j);
-//                 }
-//             }
-//         }
-//     }
-
-//     return true; // Successful inversion
-// }
-
-
-// void compute_motor_outputs() {
-//     // Define the control effectiveness matrix for a tri-copter (4x3 matrix)
-//     matrix::Matrix<float, 4, 3> M;
-//     M(0, 0) = L;  M(0, 1) = -L;  M(0, 2) = 0;   // Roll
-//     M(1, 0) = 0;  M(1, 1) = L;   M(1, 2) = -L;  // Pitch
-//     M(2, 0) = -D; M(2, 1) = -D;  M(2, 2) = D;   // Yaw
-//     M(3, 0) = 1;  M(3, 1) = 1;   M(3, 2) = 1;   // Thrust
-
-//     // Desired forces and torques vector
-//     matrix::Vector<float, 4> desired;
-//     desired(0) = torque_output(0); // Roll torque
-//     desired(1) = torque_output(1); // Pitch torque
-//     desired(2) = torque_output(2); // Yaw torque
-//     desired(3) = thrust_output;    // Total thrust
-
-//     // Compute M^T (transpose of M)
-//     matrix::Matrix<float, 3, 4> M_T = M.transpose();
-
-//     // Compute (M^T * M)
-//     matrix::Matrix<float, 3, 3> M_TM = M_T * M;
-
-//     // Compute (M^T * M)^-1 (inverse of M^T * M) using custom inverse function
-//     matrix::Matrix<float, 3, 3> M_TM_inv;
-//     if (!invertMatrix(M_TM, M_TM_inv)) {
-//         PX4_ERR("Matrix inversion failed.");
-//         return;
-//     }
-
-//     // Compute the pseudo-inverse: M^+ = (M^T * M)^-1 * M^T
-//     matrix::Matrix<float, 3, 4> M_pseudo_inv = M_TM_inv * M_T;
-
-//     // Compute motor thrusts: u = M^+ * desired
-//     matrix::Vector<float, 3> motor_thrusts = M_pseudo_inv * desired;
-
-//     // Normalize motor outputs to the range 0–1
-//     for (int i = 0; i < 3; i++) {
-//         motor_outputs(i) = math::constrain(motor_thrusts(i), 0.0f, 1.0f);
-//     }
-// }
-
-
 void publish_actuator_commands() {
     // Prepare actuator_controls_0 message
     actuator_motors_s actuator_motors = {};
@@ -382,12 +490,13 @@ void publish_actuator_commands() {
 	for(int i=0;i<4;i++){
 		motor_outputs(i)=motor_outputs(i)/(2000);
 	}
-
-    // Assign motor outputs to actuator controls
-    actuator_motors.control[0] = motor_outputs(0); // Motor 1
-    actuator_motors.control[1] = motor_outputs(1); // Motor 2
-    actuator_motors.control[2] = motor_outputs(2); // Motor 3
-    actuator_motors.control[3] = motor_outputs(3);             // Reserve for other motors if needed
+	//float motor_output=0.8;
+    //Assign motor outputs to actuator controls
+    // actuator_motors.control[0] = 0; //motor_outputs(0); // Motor 1
+    // actuator_motors.control[1] = 0;//motor_outputs(1); // Motor 2
+    // actuator_motors.control[2] = 0;//motor_outputs(2);// Motor 3
+    // actuator_motors.control[3] = 0;//motor_outputs(3);
+	//motor_output -=0.1f;             // Reserve for other motors if needed
 
     // Publish the message
     uORB::Publication<actuator_motors_s> actuator_controls_pub{ORB_ID(actuator_motors)};
@@ -397,98 +506,6 @@ void publish_actuator_commands() {
 
 }
 
-
-// void compute_geometric_control() {
-//     // Convert current Euler angles (roll, pitch, yaw) to a quaternion
-//     matrix::Quatf current_attitude(matrix::Eulerf(roll, pitch, yaw));
-
-//     // Convert desired Euler angles (desired_roll, desired_pitch, desired_yaw) to a quaternion
-//     matrix::Quatf desired_attitude(matrix::Eulerf(desired_roll, desired_pitch, desired_yaw));
-
-//     // Compute the attitude error quaternion
-//     matrix::Quatf attitude_error = current_attitude.inversed() * desired_attitude;
-
-//     // Convert quaternion error to vector form (axis-angle representation)
-//     matrix::Vector3f attitude_error_vector = 2.0f * attitude_error.imag(); // Imaginary part for axis-angle
-
-//     // Proportional control for attitude (torque contribution)
-//     matrix::Vector3f torque_p = KP_ATTITUDE * attitude_error_vector;
-
-//     // Derivative control for angular velocity (rate contribution)
-//     matrix::Vector3f torque_d = KD_ATTITUDE * matrix::Vector3f(-roll_rate, -pitch_rate, -yaw_rate);
-
-//     // Total torque output
-//     torque_output = torque_p + torque_d;
-
-//     // Constrain thrust output to the defined limits
-//     thrust_output = math::constrain(thrust_setpoint, MIN_THRUST, MAX_THRUST);
-// }
-
-//printing Roll, pitch ,yaw , thrust
-
-// int map_error_to_pwm(int error, int kp, int base_pwm = 1500) {
-//     int adjustment = 0;
-    
-//     // Map error values from -3 to 3 to motor adjustments using the proportional gain (kp)
-//     switch (error) {
-//         case -3: adjustment = -300 * kp; break;
-//         case -2: adjustment = -200 * kp; break;
-//         case -1: adjustment = -100 * kp; break;
-//         case 0: adjustment = 0; break;
-//         case 1: adjustment = 100 * kp; break;
-//         case 2: adjustment = 200 * kp; break;
-//         case 3: adjustment = 300 * kp; break;
-//         default: adjustment = 0; break; // Handle unexpected errors
-//     }
-//    
-//    return base_pwm + adjustment;
-//}
-PIDDef pid_variables(){
-	PIDDef pid;
-	pid.kpid_roll=new float[3]{1,0,0}; //0=p,1=i,2=d
-	pid.kpid_pitch=new float[3]{1,0,0};//0=o,1=i,2=d
-	//pid.kpid_yaw=new int[3]{0,0,0};//0=p,1=i,2=d
-	return pid;
-}
-PIDDef error_calculation(){
-	PIDDef pid;
-	pid.error = new float[3]; //0=roll,1=pitch,2=yaw
-	pid.error[0]=float(roll_sp-roll);
-	pid.error[1]=float(pitch_sp-pitch);
-	pid.error[2]=float(yaw_sp-yaw);
-	return pid;
-}
-float* indi_control(float* errors){
-	static float pwm_outputs[3];
-	
-
-	//think for this controll_logic
-	pwm_outputs[0]=0;
-	pwm_outputs[1]=0;
-	pwm_outputs[2]=0;
-
-	return pwm_outputs;
-}
-// motorDef tri_copter_attitude_control(){
-// 	//motorDef motor_pwm;
-//     //motor_pwm.pwm = new float[3];  // Allocate memory for 3 motors
-
-// 	//PIDDef pid_error= error_calculation();
-// 	//motor_pwm.pwm = indi_control(pid_error.error);
-// 	//motor_pwm.pwm=geometric_control();
-    
-//     // Normalize the PWM values (ensure they stay within 1000 to 2000 range)
-//     // for (int i = 0; i < 3; i++) {
-//     //     if (motor_pwm.pwm[i] < 500) {
-//     //         motor_pwm.pwm[i] = 500;  // Minimum value for PWM
-//     //     }
-//     //     if (motor_pwm.pwm[i] > 2000) {
-//     //         motor_pwm.pwm[i] = 2000;  // Maximum value for PWM
-//     //     }
-//     // }
-
-//     // return motor_pwm;
-// }
 void processAttitudeAndStatus() {
     // Subscriptions to vehicle_attitude and vehicle_status
     static uORB::Subscription vehicle_attitude_sub{ORB_ID(vehicle_attitude)};
@@ -507,38 +524,20 @@ void processAttitudeAndStatus() {
 
             // Update vehicle_attitude
             if (vehicle_attitude_sub.update(&attitude)) {
-            //     // Convert quaternion to roll, pitch, yaw
-            //     matrix::Quatf q(attitude.q);
-            //     matrix::Eulerf euler_angles(q); // Convert quaternion to Euler angles
-            //     roll = euler_angles.phi();  // Roll in radians
-            //     pitch = euler_angles.theta(); // Pitch in radians
-            //     yaw = euler_angles.psi();   // Yaw in radians
-
-                // // Calibration logic
-                // if (!calibrate) {
-                //     roll_sp = roll;    // Set roll setpoint
-                //     pitch_sp = pitch;  // Set pitch setpoint
-                //     yaw_sp = yaw;      // Set yaw setpoint
-                //     calibrate = true;
-                // }
-
-                // Placeholder thrust (optional)
-               // float thrust = 0.0f; // Replace or calculate as needed.
-
                 // Debug information
-               // PX4_INFO("Pitch: %.3f, Roll: %.3f, Yaw: %.3f", (double)pitch, (double)roll, (double)yaw);
+                PX4_INFO("Pitch: %.3f, Roll: %.3f, Yaw: %.3f", (double)pitch, (double)roll, (double)yaw);
     			//PX4_INFO("Roll Rate: %.3f, Pitch Rate: %.3f, Yaw Rate: %.3f", (double)roll_rate, (double)pitch_rate, (double)yaw_rate);
-    			PX4_INFO("Altitude: %.3f, Latitude: %.7f, Longitude: %.7f", (double)altitude, (double)latitude, (double)longitude);
+    			//PX4_INFO("Altitude: %.3f, Latitude: %.7f, Longitude: %.7f", (double)altitude, (double)latitude, (double)longitude);
 				//PX4_INFO("Desired Roll: %.2f, Pitch: %.2f, Yaw: %.2f", (double)desired_roll, (double)desired_pitch, (double)desired_yaw);
 				//PX4_INFO("Thrust Setpoint: %.2f", (double)thrust_setpoint);
-
+				//PX4_INFO("Time:%f",time_);
 				//PX4_INFO("Position - position_x: %f, position_y: %f", (double)position_x, (double)position_y);
         		//PX4_INFO("Velocity - velocity_x: %f, velocity_y: %f, velocity_z: %f", (double)velocity_x, (double)velocity_y, (double)velocity_z);
-				PX4_INFO("thrust0:%f,thrust1%f,thrust2%f",(double)thrust[0],(double)thrust[1],(double)thrust[2]);
+				//PX4_INFO("thrust0:%f,thrust1%f,thrust2%f",(double)thrust[0],(double)thrust[1],(double)thrust[2]);
 				//PX4_INFO("force_total[0]:%f,force_total[1]:%f,force_total[2]:%f",(double)force_total[0],(double)force_total[1],(double)force_total[2]);
-				PX4_INFO("torque0:%f,torque1:%f,torque2:%f",(double)torque[0],(double)torque[1],(double)torque[2]);
-				PX4_INFO("motor(0): %f,motor(1): %f,motor(2): %f,motor(3): %f",(double)motor_outputs(0),(double)motor_outputs(1),(double)motor_outputs(2),(double)motor_outputs(3));
-
+				//PX4_INFO("torque0:%f,torque1:%f,torque2:%f",(double)torque[0],(double)torque[1],(double)torque[2]);
+				//PX4_INFO("motor(0): %f,motor(1): %f,motor(2): %f,motor(3): %f",(double)motor_outputs(0),(double)motor_outputs(1),(double)motor_outputs(2),(double)motor_outputs(3));
+				//PX4_INFO("k_p%f,k_v%f,k_R%f,k_Omega%f",k_p,k_v,k_R,k_Omega);
             }
 			 
 			else {
@@ -821,12 +820,14 @@ ControlAllocator::Run()
 		parameter_update_s param_update;
 		_parameter_update_sub.copy(&param_update);
 
-		if (_handled_motor_failure_bitmask == 0) {
-			// We don't update the geometry after an actuator failure, as it could lead to unexpected results
-			// (e.g. a user could add/remove motors, such that the bitmask isn't correct anymore)
-			updateParams();
-			parameters_updated();
-		}
+/******Commenting any code that could trigger failsafe or create problem in simulating motor failure******/
+		// if (_handled_motor_failure_bitmask == 0) {
+		// 	// We don't update the geometry after an actuator failure, as it could lead to unexpected results
+		// 	// (e.g. a user could add/remove motors, such that the bitmask isn't correct anymore)
+		// 	updateParams();
+		// 	parameters_updated();
+		// }
+/**************************************************************************** */
 	}
 
 	if (_num_control_allocation == 0 || _actuator_effectiveness == nullptr) {
@@ -875,7 +876,7 @@ ControlAllocator::Run()
 
 	// Guard against too small (< 0.2ms) and too large (> 20ms) dt's.
 	const hrt_abstime now = hrt_absolute_time();
-	const float dt = math::constrain(((now - _last_run) / 1e6f), 0.0002f, 0.02f);
+	dt = math::constrain(((now - _last_run) / 1e6f), 0.0002f, 0.02f);
 
 	bool do_update = false;
 	vehicle_torque_setpoint_s vehicle_torque_setpoint;
@@ -889,7 +890,7 @@ ControlAllocator::Run()
 		_timestamp_sample = vehicle_torque_setpoint.timestamp_sample;
 
 	}
-
+	
 	// Also run allocator on thrust setpoint changes if the torque setpoint
 	// has not been updated for more than 5ms
 	if (_vehicle_thrust_setpoint_sub.update(&vehicle_thrust_setpoint)) {
@@ -1043,7 +1044,7 @@ ControlAllocator::update_effectiveness_matrix_if_needed(EffectivenessUpdateReaso
 				++actuator_idx;
 			}
 		}
-
+/******Commenting any code that could trigger failsafe or create problem in simulating motor failure******/
 		// Handle failed actuators
 		// if (_handled_motor_failure_bitmask) {
 		// 	actuator_idx = 0;
@@ -1064,7 +1065,7 @@ ControlAllocator::update_effectiveness_matrix_if_needed(EffectivenessUpdateReaso
 		// 		++actuator_idx;
 		// 	}
 		// }
-
+/********************************************************************************************************************* */
 		for (int i = 0; i < _num_control_allocation; ++i) {
 			_control_allocation[i]->setActuatorMin(minimum[i]);
 			_control_allocation[i]->setActuatorMax(maximum[i]);
@@ -1100,7 +1101,7 @@ ControlAllocator::update_effectiveness_matrix_if_needed(EffectivenessUpdateReaso
 		_actuator_servos_trim_pub.publish(trims);
 	}
 }
-
+bool land;
 void
 ControlAllocator::publish_control_allocator_status(int matrix_index)
 {
@@ -1153,6 +1154,11 @@ ControlAllocator::publish_control_allocator_status(int matrix_index)
 	_control_allocator_status_pub[matrix_index].publish(control_allocator_status);
 }
 /***************************************////////////////////////************************ */ */
+/*The below code is for reciving failsafe messages using the failure_flag method.
+ It sends the failure flag, motor index of the failed motor and the no. of failed motors.
+ the motor index is stored in `failM_index and the flaf fail_change is triggered.
+ further changes are made in publish_actuator_controls. 
+ */
 void ControlAllocator::updateFailureStatus()
 {
     failure_flag_s failure_msg;
@@ -1166,11 +1172,184 @@ void ControlAllocator::updateFailureStatus()
 
             // Perform specific actions based on the failure
 			fail_change=true;
-			faillM_indx=failure_msg.failed_motor_index;
+			failM_index=failure_msg.failed_motor_index;
         }
     }
 }
 /**************************////////////////////////////////********************************* */ */
+#include <uORB/uORB.h>
+#include <uORB/topics/vehicle_command.h>
+#include <drivers/drv_hrt.h>
+//final night tessting
+float desired_altitude = -5;
+float thrust_command=1;
+Vector4f motor_rpm;
+Vector3f position_desire {0,0,desired_altitude};
+// PID parameters structure
+struct PIDParams {
+    float kp;               // Proportional gain
+    float ki;               // Integral gain
+    float kd;               // Derivative gain
+    float integrator_limit; // Integral windup limit
+    float output_limit;     // Output saturation limit
+};
+
+// PID state structure
+struct PIDState {
+    float integrator;   // Accumulated integral value
+    float last_error;   // Last error for derivative calculation
+};
+
+PIDParams altitude_pid_params = {160.0f*4.0f, 4.0f, 0.0f, 0.0f, 0.0f};
+ // Define position PID parameters
+PIDParams pos_x_params = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+PIDParams pos_y_params = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+PIDParams pos_z_params = {1.5f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+// Define attitude PID parameters
+PIDParams roll_att_params = {0.013f*16.0f, 0.0028f*2.5f, 0.02f, 0.0f, 2.0f};  // Gains for roll attitude
+PIDParams pitch_att_params = {0.013f*16.0f, 0.002f*2.5f, 0.02f, 0.0f, 2.0f}; // Gains for pitch attitude
+PIDParams yaw_att_params = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};   // Gains for yaw attitude
+
+// Define rate PID parameters
+PIDParams roll_rate_params = {0.1f, 0.0f, 0.0f, 0.0f, 0.0f};
+PIDParams pitch_rate_params = {0.1f, 0.0f, 0.0f, 0.0f, 0.0f};
+PIDParams yaw_rate_params = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+
+float pid_controller(float setpoint, float measurement, PIDParams &params, PIDState &state) {
+    // Calculate the error
+    float error = setpoint - measurement;
+
+    // Proportional term
+    float p_term = params.kp * error;
+
+    // Integral term with anti-windup
+    state.integrator += params.ki * error * dt;
+    if (state.integrator > params.integrator_limit) {
+        state.integrator = params.integrator_limit;
+    } else if (state.integrator < -params.integrator_limit) {
+        state.integrator = -params.integrator_limit;
+    }
+    float i_term = state.integrator;
+
+    // Derivative term
+    float d_term = params.kd * (error - state.last_error) / dt;
+    state.last_error = error;
+
+    // Total PID output
+    float output = p_term + i_term + d_term;
+
+    // Constrain output
+    if (output > params.output_limit) {
+        output = params.output_limit;
+    } else if (output < -params.output_limit) {
+        output = -params.output_limit;
+    }
+
+    return output;
+}
+float constrain(float value, float min_value, float max_value){
+	if (value< min_value){
+		return min_value;
+	} else if(value > max_value){
+		return max_value;
+	} else {
+		return value;
+	}
+}
+static PIDState altitude_pid_state = {0.0f, 0.0f};
+float compute_throttle(){
+	float throttle = pid_controller(desired_altitude, altitude, altitude_pid_params, altitude_pid_state);
+	throttle = constrain(throttle,0.0f,1.0f);
+	return throttle;
+}
+void compute_pwm(float roll_command,float pitch_command, float yaw_command){
+	motor_rpm(0) = thrust_command + constrain(roll_command,0.0f,1.0f) - constrain(pitch_command,0.0f,1.0f) + yaw_command;
+	motor_rpm(1) = thrust_command - constrain(roll_command,0.0f,1.0f) - constrain(pitch_command,0.0f,1.0f) - yaw_command;
+	motor_rpm(2) = thrust_command + constrain(roll_command,0.0f,1.0f) + constrain(pitch_command,0.0f,1.0f) - yaw_command;
+	motor_rpm(3) = thrust_command - constrain(roll_command,0.0f,1.0f) + constrain(pitch_command,0.0f,1.0f) + yaw_command;
+
+	motor_rpm(0) = constrain(motor_rpm(0), 0.0f, 1.0f);
+	motor_rpm(1) = constrain(motor_rpm(1), 0.0f, 1.0f);
+	motor_rpm(2) = constrain(motor_rpm(2), 0.0f, 1.0f);
+	motor_rpm(3) = constrain(motor_rpm(3), 0.0f, 1.0f);
+
+}
+void rate_control(float roll_rate_sp, float pitch_rate_sp, float yaw_rate_sp) {
+
+    // Define rate PID states
+    static PIDState roll_rate_state = {0.0f, 0.0f};
+    static PIDState pitch_rate_state = {0.0f, 0.0f};
+    static PIDState yaw_rate_state = {0.0f, 0.0f};
+
+    // Compute PID outputs for roll, pitch, and yaw
+    float roll_command = pid_controller(roll_rate_sp, roll_rate, roll_rate_params, roll_rate_state);
+    float pitch_command = pid_controller(pitch_rate_sp, pitch_rate, pitch_rate_params, pitch_rate_state);
+    float yaw_command = pid_controller(yaw_rate_sp, yaw_rate, yaw_rate_params, yaw_rate_state);
+
+	compute_pwm(roll_command,pitch_command,yaw_command);
+}
+
+void attitude_control(Vector3f attitude_sp) {
+
+    // Define attitude PID states
+    static PIDState roll_att_state = {0.0f, 0.0f};
+    static PIDState pitch_att_state = {0.0f, 0.0f};
+    static PIDState yaw_att_state = {0.0f, 0.0f};
+
+    // Compute angular rate setpoints
+    float roll_rate_sp = pid_controller(attitude_sp(0), roll, roll_att_params, roll_att_state);
+    float pitch_rate_sp = pid_controller(attitude_sp(1), pitch, pitch_att_params, pitch_att_state);
+    float yaw_rate_sp = pid_controller(attitude_sp(3), yaw, yaw_att_params, yaw_att_state);
+
+    // Pass rate setpoints to the rate controller
+    //rate_control(roll_rate_sp, pitch_rate_sp, yaw_rate_sp);
+	compute_pwm(roll_rate_sp, pitch_rate_sp, yaw_rate_sp);
+}
+
+void position_control(Vector3f position_sp) {
+
+    // Define position PID states
+    // static PIDState pos_x_state = {0.0f, 0.0f};
+    // static PIDState pos_y_state = {0.0f, 0.0f};
+    // static PIDState pos_z_state = {0.0f, 0.0f};
+
+    // Compute velocity setpoints
+    float vel_x_sp = 0;//pid_controller(position_sp(0), position_x, pos_x_params, pos_x_state);
+    float vel_y_sp = 0;//pid_controller(position_sp(1), position_y, pos_y_params, pos_y_state);
+    float vel_z_sp = 0;//pid_controller(position_sp(2), altitude, pos_z_params, pos_z_state);
+	thrust_command = compute_throttle();
+    // Pass velocity setpoints to the attitude controller
+    Vector3f velocity_sp = {vel_x_sp*0, vel_y_sp*0, vel_z_sp*0};
+    attitude_control(velocity_sp);
+}
+/****************************************************************************************************************** */
+#include <uORB/topics/vehicle_command.h>
+#include <uORB/uORB.h>
+#include <uORB/topics/position_setpoint.h>
+
+
+// Function to initiate landing
+// void initiateLanding() {
+//     // Create a vehicle_command message
+//     struct vehicle_command_s cmd;
+//     memset(&cmd, 0, sizeof(cmd));
+
+//     cmd.timestamp = hrt_absolute_time();
+//     cmd.command = MAV_CMD_DO_LAND_START;
+//     cmd.target_system = 1; // Usually the drone itself
+//     cmd.target_component = 1; // Usually the main component
+//     cmd.source_system = 1; // Your system ID
+//     cmd.source_component = 1; // Your component ID
+
+//     // Publish the command
+//     orb_advert_t cmd_pub = orb_advertise(ORB_ID(vehicle_command), &cmd);
+//     orb_publish(ORB_ID(vehicle_command), cmd_pub, &cmd);
+// }
+
+/****************************************************************************************************************** */
+float land_altitude=-0.2;
 
 void
 ControlAllocator::publish_actuator_controls()
@@ -1183,6 +1362,7 @@ ControlAllocator::publish_actuator_controls()
 	actuator_motors.timestamp = hrt_absolute_time();
 	actuator_motors.timestamp_sample = _timestamp_sample;
 
+/******Commenting any code that could trigger failsafe or create problem in simulating motor failure******/
 	// actuator_servos_s actuator_servos;
 	// actuator_servos.timestamp = actuator_motors.timestamp;
 	// actuator_servos.timestamp_sample = _timestamp_sample;
@@ -1192,31 +1372,29 @@ ControlAllocator::publish_actuator_controls()
 	int actuator_idx = 0;
 	int actuator_idx_matrix[ActuatorEffectiveness::MAX_NUM_MATRICES] {};
 
+/******Commenting any code that could trigger failsafe or create problem in simulating motor failure******/
 	//uint32_t stopped_motors = _actuator_effectiveness->getStoppedMotors() | _handled_motor_failure_bitmask;
 	
 	
 /*********************/	
-	
-	
-	float TAKEOFF_ALTITUDE = 14.f; // Define your threshold altitude
-    	static bool disable_motor_0 = false;
-    	//bool has_taken_off = false;
-
+	/*here we defined the method for injection of failure in a single motor based on achieveing a particular altiitude.
+	the constant TAKEOFF_ALTITUDE shows the default take of altitude at which we are injecting failure.*/
+	/************************************************************************************ */
+	/********************************************************************************* */
+	float TAKEOFF_ALTITUDE = 5.0f; // Define your threshold altitude for failure
+	/******************************************************************************* */
+    /******************************************************************************* */
+	static bool disable_motor_0 = false; //declaration to disable the given motor.
 
 
     	
-    	vehicle_local_position_s local_pos; // Declare a variable to hold local position data
 
-   
-        if (_vehicle_local_position_sub.update(&local_pos)) {
-            if (local_pos.z_valid) { // Check if z is valid
-        	if (!disable_motor_0 && local_pos.z < -TAKEOFF_ALTITUDE) {
+   	/*the below funtion is for triggering the failure at the above methioned altitude.*/
+        	if (!disable_motor_0 && altitude < -TAKEOFF_ALTITUDE) {
                 disable_motor_0 = true; // Trigger motor failure once
 
             
         	}
-            } 
-        } 
 		updateFailureStatus();
         
     	
@@ -1230,52 +1408,217 @@ ControlAllocator::publish_actuator_controls()
 	for (motor_idx = 0; motor_idx < _num_actuators[0] && motor_idx < actuator_motors_s::NUM_CONTROLS; motor_idx++) {
 		int selected_matrix = _control_allocation_selection_indexes[motor_idx];
 		float actuator_sp = _control_allocation[selected_matrix]->getActuatorSetpoint()(actuator_idx_matrix[selected_matrix]);
-/*********************/			
-
-		
+/***********************************************************************************************************************************/			
+/*decoment the code and comment the above for directly changing the control alog for tunning or flying on geometric with failure at altitue of 10m */
+		/*this method mentions the way to disable a particular motor to simulate single/multiple motor failures.*/
 		if (disable_motor_0 && motor_idx == 0) {
-					// static bool gradual=true;
-					// float speed_reduced=0.8f;
-					// if(!fail_change && gradual){
-    	        	// actuator_motors.control[motor_idx+3] = speed_reduced;
-					// speed_reduced=speed_reduced-0.1f;
-    	        	// actuator_motors.control[motor_idx+1] = 0.0f;
-    	            // actuator_motors.control[motor_idx+2] = 0.0f;
-    	            // actuator_motors.control[motor_idx+3] = 0.0f;
-				//}
+					static float mode_change_time = hrt_absolute_time();
+					float time_diff = 0;
+					static bool gradual=true;
+					float speed_reduced=0.8f;
+					if(gradual){
+    	        	//actuator_motors.control[motor_idx+3] = speed_reduced;
+					speed_reduced=speed_reduced-0.1f;
+					//position_control(position_desire);
+    	        	actuator_motors.control[motor_idx+3] = 0.0f; //motor_rpm(3);
+					actuator_motors.control[motor_idx+2] = 0.0f; //motor_rpm(2);
+					actuator_motors.control[motor_idx+1] = 1.0f;// motor_rpm(1);
+					actuator_motors.control[motor_idx] = 1.0f;// motor_rpm(0);
+					float time_new = hrt_absolute_time();
+					time_diff = time_new - mode_change_time;
+					orb_advert_t pub_position_setpoint = orb_advertise(ORB_ID(position_setpoint), nullptr);
+					position_setpoint_s setpoint;
+
+					// Fill setpoint data
+					setpoint.timestamp = hrt_absolute_time();
+					setpoint.valid = true;
+					// setpoint.type = SETPOINT_TYPE_POSITION; // Use appropriate setpoint type// Set desired longitude
+					setpoint.lat=staticlat;
+					setpoint.lon=staticlong;
+
+					if(time_diff>=5000000 && time_diff < 6000000){
+						actuator_motors.control[motor_idx+1] = 0.8f;// motor_rpm(1);
+					actuator_motors.control[motor_idx] = 0.8f;
+					actuator_motors.control[motor_idx+3] = 0.0f;
+					actuator_motors.control[motor_idx+2] = 0.0f;
+						if(latitude>(staticlat+10.0f)){setpoint.lat=staticlat-20.0f;}
+						else if(latitude<(staticlat-10.0f)){setpoint.lat=staticlat+20.0f;}
+						else if(latitude>staticlat+5.0f){setpoint.lat=staticlat-8.0f;}
+						else if(latitude<staticlat-5.0f){setpoint.lat=staticlat+8.0f;}
+						else if(latitude>staticlat+3.0f){setpoint.lat=staticlat-3.0f;}
+						else if(latitude<staticlat-3.0f){setpoint.lat=staticlat+3.0f;}
+						else if(latitude>staticlat+1.5f){setpoint.lat=staticlat-1.5f;}
+						else if(latitude<staticlat-1.5f){setpoint.lat=staticlat+1.5f;}
+						else if(latitude>staticlat+0.5f){setpoint.lat=staticlat-0.5f;}
+						else if(latitude<staticlat-0.5f){setpoint.lat=staticlat+0.5f;}
+
+						if(longitude>staticlong+10.0f){setpoint.lon=staticlong-20.0f;}
+						else if(longitude<staticlong-10.0f){setpoint.lon=staticlong+20.0f;}
+						else if(longitude>staticlong+5.0f){setpoint.lon=staticlong-8.0f;}
+						else if(longitude<staticlong-5.0f){setpoint.lon=staticlong+8.0f;}
+						else if(longitude>staticlong+3.0f){setpoint.lon=staticlong-3.0f;}
+						else if(longitude<staticlong-3.0f){setpoint.lon=staticlong+3.0f;}
+						else if(longitude>staticlong+1.5f){setpoint.lon=staticlong-1.5f;}
+						else if(longitude<staticlong-1.5f){setpoint.lon=staticlong+1.5f;}
+						else if(longitude>staticlong+0.5f){setpoint.lon=staticlong-0.5f;}
+						else if(longitude<staticlong-0.5f){setpoint.lon=staticlong+0.5f;}
+
+					}
+					else if(time_diff>=6000000 && time_diff < 7000000){
+						actuator_motors.control[motor_idx+1] = 0.6f;// motor_rpm(1);
+					actuator_motors.control[motor_idx] = 0.6f;
+					actuator_motors.control[motor_idx+3] = 0.0f;
+					actuator_motors.control[motor_idx+2] = 0.0f; 
+					/******************************************************** */
+					/****************************************************** */
+					setpoint.alt = -2.; // Set desired altitude
+					/******************************************************** */
+					/********************************************************** */
+						if(latitude>(staticlat+10.0f)){setpoint.lat=staticlat-20.0f;}
+						else if(latitude<(staticlat-10.0f)){setpoint.lat=staticlat+20.0f;}
+						else if(latitude>staticlat+5.0f){setpoint.lat=staticlat-8.0f;}
+						else if(latitude<staticlat-5.0f){setpoint.lat=staticlat+8.0f;}
+						else if(latitude>staticlat+3.0f){setpoint.lat=staticlat-3.0f;}
+						else if(latitude<staticlat-3.0f){setpoint.lat=staticlat+3.0f;}
+						else if(latitude>staticlat+1.5f){setpoint.lat=staticlat-1.5f;}
+						else if(latitude<staticlat-1.5f){setpoint.lat=staticlat+1.5f;}
+						else if(latitude>staticlat+0.5f){setpoint.lat=staticlat-0.5f;}
+						else if(latitude<staticlat-0.5f){setpoint.lat=staticlat+0.5f;}
+
+						if(longitude>staticlong+10.0f){setpoint.lon=staticlong-20.0f;}
+						else if(longitude<staticlong-10.0f){setpoint.lon=staticlong+20.0f;}
+						else if(longitude>staticlong+5.0f){setpoint.lon=staticlong-8.0f;}
+						else if(longitude<staticlong-5.0f){setpoint.lon=staticlong+8.0f;}
+						else if(longitude>staticlong+3.0f){setpoint.lon=staticlong-3.0f;}
+						else if(longitude<staticlong-3.0f){setpoint.lon=staticlong+3.0f;}
+						else if(longitude>staticlong+1.5f){setpoint.lon=staticlong-1.5f;}
+						else if(longitude<staticlong-1.5f){setpoint.lon=staticlong+1.5f;}
+						else if(longitude>staticlong+0.5f){setpoint.lon=staticlong-0.5f;}
+						else if(longitude<staticlong-0.5f){setpoint.lon=staticlong+0.5f;}
+					}
+					else if(time_diff>=7000000 /*&& time_diff < 8000000*/){
+						land=true;
+						setpoint.alt = 0.5;
+						actuator_motors.control[motor_idx+1] = 0.6f;// motor_rpm(1);
+					actuator_motors.control[motor_idx] = 0.6f;
+					actuator_motors.control[motor_idx+3] = 0.0f;
+					actuator_motors.control[motor_idx+2] = 0.0f;
+						if(latitude>(staticlat+10.0f)){setpoint.lat=staticlat-20.0f;}
+						else if(latitude<(staticlat-10.0f)){setpoint.lat=staticlat+20.0f;}
+						else if(latitude>staticlat+5.0f){setpoint.lat=staticlat-8.0f;}
+						else if(latitude<staticlat-5.0f){setpoint.lat=staticlat+8.0f;}
+						else if(latitude>staticlat+3.0f){setpoint.lat=staticlat-3.0f;}
+						else if(latitude<staticlat-3.0f){setpoint.lat=staticlat+3.0f;}
+						else if(latitude>staticlat+1.5f){setpoint.lat=staticlat-1.5f;}
+						else if(latitude<staticlat-1.5f){setpoint.lat=staticlat+1.5f;}
+						else if(latitude>staticlat+0.5f){setpoint.lat=staticlat-0.5f;}
+						else if(latitude<staticlat-0.5f){setpoint.lat=staticlat+0.5f;}
+
+						if(longitude>staticlong+10.0f){setpoint.lon=staticlong-20.0f;}
+						else if(longitude<staticlong-10.0f){setpoint.lon=staticlong+20.0f;}
+						else if(longitude>staticlong+5.0f){setpoint.lon=staticlong-8.0f;}
+						else if(longitude<staticlong-5.0f){setpoint.lon=staticlong+8.0f;}
+						else if(longitude>staticlong+3.0f){setpoint.lon=staticlong-3.0f;}
+						else if(longitude<staticlong-3.0f){setpoint.lon=staticlong+3.0f;}
+						else if(longitude>staticlong+1.5f){setpoint.lon=staticlong-1.5f;}
+						else if(longitude<staticlong-1.5f){setpoint.lon=staticlong+1.5f;}
+						else if(longitude>staticlong+0.5f){setpoint.lon=staticlong-0.5f;}
+						else if(longitude<staticlong-0.5f){setpoint.lon=staticlong+0.5f;}
+						 // Set desired altitude
+					// 	actuator_motors.control[motor_idx+1] = 0.4f;// motor_rpm(1);
+					// actuator_motors.control[motor_idx] = 0.4f;
+					}
+					// if(time_diff>=8000000 && time_diff < 9000000){
+					// 	actuator_motors.control[motor_idx+1] = 0.2f;// motor_rpm(1);
+					// actuator_motors.control[motor_idx] = 0.2f;
+					// }
+					// if(time_diff>=9000000 && time_diff < 10000000){
+					// 	actuator_motors.control[motor_idx+1] = 0.0f;// motor_rpm(1);
+					// actuator_motors.control[motor_idx] = 0.0f;
+					// }
+					// else if(time_diff>=7000000){
+					// 	initiatelanding();
+					// }
+					if(land){
+						actuator_motors.control[motor_idx+3] = 0.0f;
+					actuator_motors.control[motor_idx+2] = 0.0f;
+						if(latitude>(staticlat+10.0f)){setpoint.lat=staticlat-20.0f;}
+						else if(latitude<(staticlat-10.0f)){setpoint.lat=staticlat+20.0f;}
+						else if(latitude>staticlat+5.0f){setpoint.lat=staticlat-8.0f;}
+						else if(latitude<staticlat-5.0f){setpoint.lat=staticlat+8.0f;}
+						else if(latitude>staticlat+3.0f){setpoint.lat=staticlat-3.0f;}
+						else if(latitude<staticlat-3.0f){setpoint.lat=staticlat+3.0f;}
+						else if(latitude>staticlat+1.5f){setpoint.lat=staticlat-1.5f;}
+						else if(latitude<staticlat-1.5f){setpoint.lat=staticlat+1.5f;}
+						else if(latitude>staticlat+0.5f){setpoint.lat=staticlat-0.5f;}
+						else if(latitude<staticlat-0.5f){setpoint.lat=staticlat+0.5f;}
+
+						if(longitude>staticlong+10.0f){setpoint.lon=staticlong-20.0f;}
+						else if(longitude<staticlong-10.0f){setpoint.lon=staticlong+20.0f;}
+						else if(longitude>staticlong+5.0f){setpoint.lon=staticlong-8.0f;}
+						else if(longitude<staticlong-5.0f){setpoint.lon=staticlong+8.0f;}
+						else if(longitude>staticlong+3.0f){setpoint.lon=staticlong-3.0f;}
+						else if(longitude<staticlong-3.0f){setpoint.lon=staticlong+3.0f;}
+						else if(longitude>staticlong+1.5f){setpoint.lon=staticlong-1.5f;}
+						else if(longitude<staticlong-1.5f){setpoint.lon=staticlong+1.5f;}
+						else if(longitude>staticlong+0.5f){setpoint.lon=staticlong-0.5f;}
+						else if(longitude<staticlong-0.5f){setpoint.lon=staticlong+0.5f;}
+					if(altitude>-land_altitude){
+						vehicle_command_s cmd = {};
+    					cmd.timestamp = hrt_absolute_time();
+    					cmd.param1 = 0.0f; // 0 = disarm
+    					cmd.param2 = 21196.0f; // magic number typically used in MAVLink commands to avoid accidental disarms
+    					cmd.command = vehicle_command_s::VEHICLE_CMD_COMPONENT_ARM_DISARM;
+    					cmd.target_system = 1;
+    					cmd.target_component = 1;
+    					cmd.source_system = 1;
+    					cmd.source_component = 1;
+    					cmd.from_external = false;
+						
+   						// Advertise and publish the command
+    					static orb_advert_t cmd_pub = orb_advertise(ORB_ID(vehicle_command), &cmd);
+    					if (cmd_pub != nullptr) {
+        					orb_publish(ORB_ID(vehicle_command), cmd_pub, &cmd);
+    					} else {
+        					// If first time advertising failed, try again
+        					cmd_pub = orb_advertise(ORB_ID(vehicle_command), &cmd);
+    					}
+						actuator_motors.control[motor_idx+3] = 0.0f;
+						actuator_motors.control[motor_idx+2] = 0.0f;
+						actuator_motors.control[motor_idx+1] = 0.0f;
+						actuator_motors.control[motor_idx] = 0.0f;
+						}}
+						orb_publish(ORB_ID(position_setpoint), pub_position_setpoint, &setpoint);
+						PX4_INFO("motor1:%f,motor2:%f",(double)actuator_motors.control[motor_idx+1],(double)actuator_motors.control[motor_idx]);
+						PX4_INFO("time:%f",(double)time_diff);
+					}
 		
 		} 
 		else {
-		    actuator_motors.control[motor_idx] = PX4_ISFINITE(actuator_sp) ? actuator_sp : NAN;
+		   actuator_motors.control[motor_idx] = PX4_ISFINITE(actuator_sp) ? actuator_sp : NAN;
 		}
-		if(altitude<-10){
-			geo=true;
-		}
-		//if(fail_change && faillM_indx==motor_idx){
-		if(geo){
+		/*the below code mentions change of control to geometric controller based on the value of the altitude for tunning/ testing 
+		the geometric contreller along with in case of a single motor failure.*/
+		/*the below method calls the motor_idx for the particular failed method
+		 and the following code uses geometric controller for gaining staiblity with three motors.*/
+		if(fail_change && failM_index==motor_idx){
+			//actuator_motors.control[motor_idx+3] = 0.0f;
+			// actuator_motors.control[motor_idx+2] = 0.0f;
+			// actuator_motors.control[motor_idx+1] = 0.0f;
+			// actuator_motors.control[motor_idx] = 0.0f;
     		fetchFlightData();
-			update_attitude_setpoint();
-    		// Step 2: Compute geometric control
-			geometric_controller_main_logic();
-    		//compute_geometric_control();
+			// update_attitude_setpoint();
+    		// // Step 2: Compute geometric control
+			// geometric_controller_main_logic();
 
-   			 // Step 3: Publish actuator commands
-    		//compute_motor_outputs();
-			publish_actuator_commands();
+   			//  // Step 3: Publish actuator commands
+    		// //compute_motor_outputs();
+			// publish_actuator_commands();
 			if(!check){
 				PX4_INFO("CHANGED CONTROL");
 				check=true;
 			}
-			// motorDef motor_pwm = tri_copter_attitude_control();
-			// actuator_motors.control[motor_idx] = 0.f;
-			// actuator_motors.control[motor_idx+1] = motor_pwm.pwm[0];
-    	    // actuator_motors.control[motor_idx+2] =  motor_pwm.pwm[1];
-    	    // actuator_motors.control[motor_idx+3] =  motor_pwm.pwm[2];
-
-			// actuator_motors.control[motor_idx+1] = motor_outputs(0);
-    	    // actuator_motors.control[motor_idx+2] = motor_outputs(1);
-    	    // actuator_motors.control[motor_idx+3] = motor_outputs(2);
-
+			/*the original functions here are commented off.*/
 			// actuator_motors.control[motor_idx] = PX4_ISFINITE(actuator_sp) ? actuator_sp : NAN;
 			// actuator_motors.control[motor_idx+1] = PX4_ISFINITE(actuator_sp) ? actuator_sp : NAN;
 			// actuator_motors.control[motor_idx+2] = PX4_ISFINITE(actuator_sp) ? actuator_sp : NAN;
@@ -1286,11 +1629,49 @@ ControlAllocator::publish_actuator_controls()
 		// if (stopped_motors & (1u << motor_idx)) {
 		// 	actuator_motors.control[motor_idx] = NAN;
 		// }
+/******************************************************************************************************************************* */
+/******************************************************************************************************************************* */
+		// /*the below code mentions change of control to geometric controller based on the value of the altitude for tunning/ testing 
+		// the geometric contreller along with in case of a single motor failure.*/
+		// if(altitude<-5.0f){
+		// 	geo=true;
+		// 	failM_index=3;
+		// }
+		// /*the below method calls the motor_idx for the particular failed method
+		//  and the following code uses geometric controller for gaining staiblity with three motors.*/
+		// if(geo){
+    	// 	fetchFlightData();
+		// 	update_attitude_setpoint();
+    	// 	// Step 2: Compute geometric control
+		// 	geometric_controller_main_logic();
 
+   		// 	 // Step 3: Publish actuator commands
+		// 	publish_actuator_commands();
+		// 	if(!check){
+		// 		PX4_INFO("CHANGED CONTROL");
+		// 		check=true;
+		// 	}
+		// 	actuator_motors.control[0] = 0;//motor_outputs(0);
+		// 	actuator_motors.control[1] = 0;//motor_outputs(1);
+		// 	actuator_motors.control[2] = 0;//motor_outputs(2);
+		// 	actuator_motors.control[3] = 0;//motor_outputs(3);
+		// 	//PX4_INFO("MOTOR1:%f,MOTOR2:%f,MOTOR3:%f,MOTOR4:%f",(double)actuator_motors.control[0],(double)actuator_motors.control[1],(double)actuator_motors.control[2],(double)actuator_motors.control[3]);
+		// 	/*the original functions here are commented off.*/
+		// 	// actuator_motors.control[motor_idx] = PX4_ISFINITE(actuator_sp) ? actuator_sp : NAN;
+		// 	// actuator_motors.control[motor_idx+1] = PX4_ISFINITE(actuator_sp) ? actuator_sp : NAN;
+		// 	// actuator_motors.control[motor_idx+2] = PX4_ISFINITE(actuator_sp) ? actuator_sp : NAN;
+		// 	// actuator_motors.control[motor_idx+3] = PX4_ISFINITE(actuator_sp) ? actuator_sp : NAN;
+		// 	//PX4_INFO("trying to regain control");
+		// }
+		// // else {
+    	// // 	actuator_motors.control[motor_idx] = PX4_ISFINITE(actuator_sp) ? actuator_sp : NAN;
+		// // }
+		
+/******************************************************************************************************************************* */
 		++actuator_idx_matrix[selected_matrix];
 		++actuator_idx;
 		
-/****************************/	        			
+/*************************************************************************************************************/	        			
 
 	}
 
@@ -1323,8 +1704,7 @@ ControlAllocator::publish_actuator_controls()
 
 //     	// 	    PX4_INFO("Detected failure for motor %d", motors_idx);
 // 		// }
-
-// 	}
+//	}
 }
 /*
 void
